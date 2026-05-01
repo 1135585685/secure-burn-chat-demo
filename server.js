@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, join, normalize } from "node:path";
 import { WebSocketServer } from "ws";
@@ -8,7 +9,8 @@ const PUBLIC_DIR = join(process.cwd(), "public");
 const DATA_FILE = process.env.DATA_FILE || join(process.cwd(), "data", "store.json");
 const clients = new Map();
 const offlineQueues = new Map();
-const OFFLINE_TTL_MS = 60 * 1000;
+const OFFLINE_TTL_MS = 30 * 1000;
+const MAX_OFFLINE_QUEUE_PER_USER = 20;
 let store = { users: {}, friends: {} };
 
 const contentTypes = {
@@ -86,8 +88,8 @@ wss.on("connection", (socket) => {
         encrypted: packet.encrypted,
         createdAt: Date.now()
       };
-      deliverOrQueue(sealed);
-      send(socket, { type: "sent", id: sealed.id, to });
+      const delivery = deliverOrQueue(sealed);
+      send(socket, { type: "sent", id: sealed.id, to, delivery });
     }
   });
 
@@ -125,7 +127,7 @@ async function handleApi(req, res, url) {
     const userId = sanitizeId(decodeURIComponent(url.pathname.split("/").pop() || ""));
     const user = userId ? store.users[userId] : null;
     if (!user) return json(res, 404, { ok: false, error: "User not found" });
-    return json(res, 200, { ok: true, userId, publicKey: user.publicKey });
+    return json(res, 200, { ok: true, userId, publicKey: user.publicKey, fingerprint: user.fingerprint || fingerprintPublicKey(user.publicKey) });
   }
 
   if (req.method === "GET" && url.pathname.startsWith("/api/friends/")) {
@@ -179,9 +181,15 @@ async function saveStore() {
 }
 
 async function registerUser(userId, publicKey) {
-  store.users[userId] = { publicKey, updatedAt: Date.now() };
+  const fingerprint = fingerprintPublicKey(publicKey);
+  const previous = store.users[userId];
+  const keyChanged = Boolean(previous?.fingerprint && previous.fingerprint !== fingerprint);
+  store.users[userId] = { publicKey, fingerprint, updatedAt: Date.now() };
   store.friends[userId] ||= [];
   await saveStore();
+  if (keyChanged) {
+    broadcastKeyChange(userId);
+  }
 }
 
 async function addFriend(userId, friendId) {
@@ -220,6 +228,7 @@ function getFriends(userId) {
     .map((friendId) => store.users[friendId] ? {
       userId: friendId,
       publicKey: store.users[friendId].publicKey,
+      fingerprint: store.users[friendId].fingerprint || fingerprintPublicKey(store.users[friendId].publicKey),
       confirmed: areMutualFriends(userId, friendId),
       online: areMutualFriends(userId, friendId) && isOnline(friendId)
     } : null)
@@ -256,10 +265,14 @@ function deliverOrQueue(packet) {
   const target = clients.get(packet.to);
   if (target?.readyState === target.OPEN) {
     send(target, packet);
-    return;
+    return "delivered";
   }
 
   const queue = offlineQueues.get(packet.to) || [];
+  if (queue.length >= MAX_OFFLINE_QUEUE_PER_USER) {
+    sendUser(packet.from, { type: "expired", id: packet.id, to: packet.to, reason: "recipient queue full" });
+    return "rejected";
+  }
   queue.push(packet);
   offlineQueues.set(packet.to, queue);
   setTimeout(() => {
@@ -267,7 +280,11 @@ function deliverOrQueue(packet) {
     const filtered = existing.filter((item) => item.id !== packet.id);
     if (filtered.length) offlineQueues.set(packet.to, filtered);
     else offlineQueues.delete(packet.to);
+    if (existing.length !== filtered.length) {
+      sendUser(packet.from, { type: "expired", id: packet.id, to: packet.to, reason: "offline ttl expired" });
+    }
   }, OFFLINE_TTL_MS).unref();
+  return "queued";
 }
 
 function flushOffline(userId) {
@@ -275,7 +292,10 @@ function flushOffline(userId) {
   if (!queue?.length) return;
   offlineQueues.delete(userId);
   for (const packet of queue) {
-    if (Date.now() - packet.createdAt < OFFLINE_TTL_MS) send(clients.get(userId), packet);
+    if (Date.now() - packet.createdAt < OFFLINE_TTL_MS) {
+      send(clients.get(userId), packet);
+      sendUser(packet.from, { type: "delivered", id: packet.id, to: userId });
+    }
   }
 }
 
@@ -308,6 +328,22 @@ function broadcastPresence(changedUserId) {
   }
 }
 
+function broadcastKeyChange(changedUserId) {
+  const affected = new Set([
+    ...(store.friends[changedUserId] || []),
+    ...Object.entries(store.friends)
+      .filter(([, friends]) => friends.includes(changedUserId))
+      .map(([userId]) => userId)
+  ]);
+  for (const userId of affected) {
+    sendUser(userId, {
+      type: "keyChanged",
+      userId: changedUserId,
+      friends: getFriends(userId)
+    });
+  }
+}
+
 function sanitizeId(value) {
   if (typeof value !== "string") return "";
   const clean = value.trim();
@@ -323,6 +359,18 @@ function isPublicKey(value) {
     coord.test(value.x || "") &&
     coord.test(value.y || "")
   );
+}
+
+function fingerprintPublicKey(publicKey) {
+  return createHash("sha256").update(canonicalJson(publicKey)).digest("hex").match(/.{1,4}/g).slice(0, 8).join(" ");
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 server.listen(PORT, () => {

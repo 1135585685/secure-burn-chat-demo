@@ -159,6 +159,15 @@ h2 {
   margin-top: 8px;
 }
 
+.fingerprint-line {
+  margin-top: 6px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .panel {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -274,6 +283,11 @@ h2 {
 .friend small {
   color: var(--muted);
   font-size: 12px;
+}
+
+.friend .fingerprint {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
 }
 
 .friend.active {

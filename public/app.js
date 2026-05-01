@@ -5,6 +5,7 @@ const els = {
   wipeBtn: document.querySelector("#wipeBtn"),
   sessionActions: document.querySelector("#sessionActions"),
   connectionState: document.querySelector("#connectionState"),
+  identityFingerprint: document.querySelector("#identityFingerprint"),
   inviteCode: document.querySelector("#inviteCode"),
   copyInviteBtn: document.querySelector("#copyInviteBtn"),
   friendId: document.querySelector("#friendId"),
@@ -22,6 +23,8 @@ const els = {
 };
 
 const MESSAGE_TTL_SECONDS = 15 * 60;
+const IDENTITY_DB = "secureBurnIdentityDb";
+const IDENTITY_STORE = "identityKeys";
 
 const state = {
   userId: "",
@@ -29,7 +32,7 @@ const state = {
   connected: false,
   keyPair: null,
   publicJwk: null,
-  privateJwk: null,
+  fingerprint: "",
   friends: new Map(),
   activeFriendId: "",
   visibleSender: "",
@@ -88,7 +91,7 @@ els.wipeBtn.addEventListener("click", async () => {
   } catch {
     toast("服务端删除失败，本机记录仍会清除。");
   }
-  wipeLocalUser(userId);
+  await wipeLocalUser(userId);
   resetSession();
   toast("所有本机记录已删除，服务端资料已请求删除。");
 });
@@ -150,17 +153,11 @@ els.messageForm.addEventListener("submit", async (event) => {
 
 async function loadOrCreateIdentity(userId) {
   const saved = loadProfile(userId);
-  if (saved?.userId === userId && saved.privateJwk && saved.publicJwk) {
-    state.privateJwk = saved.privateJwk;
+  const storedKey = await loadIdentityKey(userId);
+  if (storedKey?.privateKey && saved?.publicJwk) {
     state.publicJwk = saved.publicJwk;
     state.keyPair = {
-      privateKey: await crypto.subtle.importKey(
-        "jwk",
-        saved.privateJwk,
-        { name: "ECDH", namedCurve: "P-256" },
-        true,
-        ["deriveKey"]
-      ),
+      privateKey: storedKey.privateKey,
       publicKey: await crypto.subtle.importKey(
         "jwk",
         saved.publicJwk,
@@ -169,24 +166,46 @@ async function loadOrCreateIdentity(userId) {
         []
       )
     };
+  } else if (saved?.userId === userId && saved.privateJwk && saved.publicJwk) {
+    state.publicJwk = saved.publicJwk;
+    const privateKey = await crypto.subtle.importKey(
+      "jwk",
+      saved.privateJwk,
+      { name: "ECDH", namedCurve: "P-256" },
+      false,
+      ["deriveKey"]
+    );
+    state.keyPair = {
+      privateKey,
+      publicKey: await crypto.subtle.importKey(
+        "jwk",
+        saved.publicJwk,
+        { name: "ECDH", namedCurve: "P-256" },
+        true,
+        []
+      )
+    };
+    await saveIdentityKey(userId, privateKey);
   } else {
     state.keyPair = await crypto.subtle.generateKey(
       { name: "ECDH", namedCurve: "P-256" },
-      true,
+      false,
       ["deriveKey"]
     );
     state.publicJwk = await crypto.subtle.exportKey("jwk", state.keyPair.publicKey);
-    state.privateJwk = await crypto.subtle.exportKey("jwk", state.keyPair.privateKey);
+    await saveIdentityKey(userId, state.keyPair.privateKey);
   }
 
   state.userId = userId;
+  state.fingerprint = await fingerprintPublicKey(state.publicJwk);
   localStorage.setItem(`secureBurnProfile:${userId}`, JSON.stringify({
     userId,
     publicJwk: state.publicJwk,
-    privateJwk: state.privateJwk
+    fingerprint: state.fingerprint
   }));
   localStorage.setItem("secureBurnLastUserId", userId);
-  els.inviteCode.value = makeInvite(userId, state.publicJwk);
+  els.inviteCode.value = makeInvite(userId, state.publicJwk, state.fingerprint);
+  renderIdentityFingerprint();
 }
 
 async function registerProfile() {
@@ -230,13 +249,29 @@ function connect(userId) {
     }
     if (packet.type === "accountDeleted") {
       const userId = state.userId;
-      if (userId) wipeLocalUser(userId);
+      if (userId) await wipeLocalUser(userId);
       resetSession();
       toast("账号记录已删除。");
       return;
     }
     if (packet.type === "sent") {
-      toast(`密文已交给中继：${packet.to}`);
+      toast(packet.delivery === "delivered" ? `密文已送达：${packet.to}` : `密文已进入短期队列：${packet.to}`);
+      return;
+    }
+    if (packet.type === "delivered") {
+      toast(`密文已送达：${packet.to}`);
+      return;
+    }
+    if (packet.type === "expired") {
+      toast(`密文未送达并已过期：${packet.to}`);
+      return;
+    }
+    if (packet.type === "keyChanged") {
+      replaceFriends(packet.friends);
+      saveFriends();
+      renderFriends();
+      syncComposerState();
+      toast(`${packet.userId} 的身份密钥发生变化，请重新核对指纹。`);
       return;
     }
     if (packet.type === "error") {
@@ -285,6 +320,7 @@ async function encryptForFriend(friend, payload) {
   return {
     version: 1,
     alg: "ECDH-P256+AES-GCM",
+    protocol: "demo-ecdh-v1",
     iv: toBase64(iv),
     ciphertext: toBase64(new Uint8Array(ciphertext))
   };
@@ -370,6 +406,7 @@ function renderFriends() {
         <span>
           <strong>${escapeHtml(friend.userId)}</strong>
           <small>${escapeHtml(friendLabel(friend))}</small>
+          <small class="fingerprint">${escapeHtml(friend.fingerprint || "无指纹")}</small>
         </span>
       </button>
       <button class="danger-btn" type="button" title="删除好友">删除</button>
@@ -410,18 +447,18 @@ async function resolveFriend() {
   if (!/^[a-zA-Z0-9_-]{3,32}$/.test(rawId)) throw new Error("bad id");
   try {
     const result = await api(`/api/users/${encodeURIComponent(rawId)}`);
-    return { userId: result.userId, publicKey: result.publicKey };
+    return { userId: result.userId, publicKey: result.publicKey, fingerprint: result.fingerprint || await fingerprintPublicKey(result.publicKey) };
   } catch (error) {
     const localProfile = loadProfile(rawId);
     if (localProfile?.publicJwk) {
-      return { userId: rawId, publicKey: localProfile.publicJwk };
+      return { userId: rawId, publicKey: localProfile.publicJwk, fingerprint: localProfile.fingerprint || await fingerprintPublicKey(localProfile.publicJwk) };
     }
     throw error;
   }
 }
 
-function makeInvite(userId, publicKey) {
-  return btoaUnicode(JSON.stringify({ userId, publicKey }));
+function makeInvite(userId, publicKey, fingerprint) {
+  return btoaUnicode(JSON.stringify({ userId, publicKey, fingerprint }));
 }
 
 function parseInvite(value) {
@@ -445,7 +482,13 @@ function restoreFriends(userId) {
 
 function mergeFriends(friends = []) {
   for (const friend of friends) {
-    if (friend?.userId && friend?.publicKey) state.friends.set(friend.userId, friend);
+    if (!friend?.userId || !friend?.publicKey) continue;
+    const current = state.friends.get(friend.userId);
+    const keyChanged = Boolean(current?.fingerprint && friend.fingerprint && current.fingerprint !== friend.fingerprint);
+    state.friends.set(friend.userId, { ...friend, keyChanged });
+    if (keyChanged) {
+      toast(`${friend.userId} 的身份密钥已变更，请核对指纹。`);
+    }
   }
 }
 
@@ -469,7 +512,7 @@ function resetSession({ keepUserInput = false } = {}) {
   state.connected = false;
   state.keyPair = null;
   state.publicJwk = null;
-  state.privateJwk = null;
+  state.fingerprint = "";
   state.userId = "";
   state.friends.clear();
   state.activeFriendId = "";
@@ -481,6 +524,7 @@ function resetSession({ keepUserInput = false } = {}) {
   els.chatTitle.textContent = "请选择好友";
   els.securityStatus.textContent = "等待身份密钥";
   els.connectionState.textContent = "未连接";
+  els.identityFingerprint.textContent = "身份指纹：未生成";
   showEmpty("已退出。输入 ID 后可重新进入。");
   renderSession();
   renderFriends();
@@ -493,9 +537,10 @@ function renderSession() {
   els.startBtn.textContent = loggedIn ? "登入" : "进入";
 }
 
-function wipeLocalUser(userId) {
+async function wipeLocalUser(userId) {
   localStorage.removeItem(`secureBurnProfile:${userId}`);
   localStorage.removeItem(`secureBurnFriends:${userId}`);
+  await deleteIdentityKey(userId);
   if (localStorage.getItem("secureBurnLastUserId") === userId) {
     localStorage.removeItem("secureBurnLastUserId");
   }
@@ -518,8 +563,13 @@ function syncComposerState() {
 }
 
 function friendLabel(friend) {
+  if (friend.keyChanged) return "密钥已变更，请核对";
   if (!friend.confirmed) return "待对方确认";
   return friend.online ? "在线，可发送" : "离线";
+}
+
+function renderIdentityFingerprint() {
+  els.identityFingerprint.textContent = state.fingerprint ? `身份指纹：${state.fingerprint}` : "身份指纹：未生成";
 }
 
 function clearMessageTimer() {
@@ -578,6 +628,62 @@ function btoaUnicode(value) {
 
 function atobUnicode(value) {
   return decoder.decode(fromBase64(value));
+}
+
+function openIdentityDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(IDENTITY_DB, 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(IDENTITY_STORE, { keyPath: "userId" });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function loadIdentityKey(userId) {
+  const db = await openIdentityDb();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(IDENTITY_STORE, "readonly").objectStore(IDENTITY_STORE).get(userId);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function saveIdentityKey(userId, privateKey) {
+  const db = await openIdentityDb();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(IDENTITY_STORE, "readwrite").objectStore(IDENTITY_STORE).put({ userId, privateKey, updatedAt: Date.now() });
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function deleteIdentityKey(userId) {
+  const db = await openIdentityDb();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(IDENTITY_STORE, "readwrite").objectStore(IDENTITY_STORE).delete(userId);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function fingerprintPublicKey(publicKey) {
+  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(canonicalJson(publicKey)));
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")
+    .match(/.{1,4}/g)
+    .slice(0, 8)
+    .join(" ");
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function escapeHtml(value) {

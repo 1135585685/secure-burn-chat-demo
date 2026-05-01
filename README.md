@@ -3,11 +3,13 @@
 一个轻量网页通信 Demo，重点演示：
 
 - 浏览器端生成 ECDH P-256 密钥
+- 身份私钥保存为 IndexedDB 中不可导出的 WebCrypto `CryptoKey`
+- 身份公钥指纹校验和密钥变更提醒
 - 消息在浏览器内用 AES-GCM 加密
 - Node 服务端只做 WebSocket 中继
 - 服务端不保存明文消息
 - 服务端持久保存用户公钥和好友关系
-- 离线密文只存内存，并在 60 秒后过期
+- 离线密文只存内存，最多 20 条，30 秒后过期，并返回投递/过期回执
 - 单轮次消息窗口：同一方连续消息会保留；对方发出下一条后，上一方消息消失；最后一条消息 15 分钟后消失
 - 通过好友 ID 或邀请代码添加好友
 - 双方互相添加且好友在线后，才允许发送消息
@@ -41,12 +43,12 @@ http://localhost:8787
 
 ## 安全说明
 
-这是原型 Demo，不是生产级安全产品。当前版本为了轻量化，私钥保存在浏览器 `localStorage` 中，适合演示端到端加密流程，但不适合真实高安全场景。
+这是原型 Demo，不是生产级安全产品。当前版本已经把身份私钥迁移到 IndexedDB 中的不可导出 `CryptoKey`，但网页端仍然无法防止恶意浏览器扩展、被篡改的前端代码、截图、调试器和被攻破设备。
 
 生产版本建议升级：
 
-- 使用 IndexedDB + WebCrypto non-extractable key 或原生 App Keychain/Keystore
-- 使用 Signal Protocol，而不是简单 ECDH 会话密钥
+- 原生 App 使用 iOS Keychain / Android Keystore
+- 接入官方 Signal `libsignal`，替换当前 Demo 的简单 ECDH 会话密钥
 - 增加身份密钥指纹校验和密钥变更提醒
 - 给离线密文增加更严格的 TTL、队列限制和交付回执
 - 做完整安全审计
