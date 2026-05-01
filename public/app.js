@@ -32,6 +32,7 @@ const state = {
   privateJwk: null,
   friends: new Map(),
   activeFriendId: "",
+  visibleSender: "",
   messageTimer: null
 };
 
@@ -316,8 +317,13 @@ async function deriveAesKey(friendPublicJwk) {
 }
 
 function addMessage({ from, text, burnAfter, mine, status }) {
+  const senderKey = mine ? "me" : from;
+  if (state.visibleSender && state.visibleSender !== senderKey) {
+    els.messages.innerHTML = "";
+  }
+  state.visibleSender = senderKey;
   clearMessageTimer();
-  els.messages.innerHTML = "";
+  if (els.messages.querySelector(".empty")) els.messages.innerHTML = "";
   const node = document.createElement("article");
   node.className = `message ${mine ? "mine" : ""}`;
   node.innerHTML = `
@@ -458,6 +464,7 @@ function resetSession({ keepUserInput = false } = {}) {
   state.userId = "";
   state.friends.clear();
   state.activeFriendId = "";
+  state.visibleSender = "";
   els.inviteCode.value = "";
   if (!keepUserInput) els.userId.value = "";
   els.friendId.value = "";
@@ -513,6 +520,7 @@ function clearMessageTimer() {
 
 function showEmpty(text) {
   clearMessageTimer();
+  state.visibleSender = "";
   els.messages.innerHTML = `<p class="empty">${escapeHtml(text)}</p>`;
 }
 
