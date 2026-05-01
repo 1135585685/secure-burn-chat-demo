@@ -4,6 +4,7 @@ const els = {
   connectionState: document.querySelector("#connectionState"),
   inviteCode: document.querySelector("#inviteCode"),
   copyInviteBtn: document.querySelector("#copyInviteBtn"),
+  friendId: document.querySelector("#friendId"),
   friendInvite: document.querySelector("#friendInvite"),
   addFriendBtn: document.querySelector("#addFriendBtn"),
   friendList: document.querySelector("#friendList"),
@@ -19,6 +20,7 @@ const els = {
 const state = {
   userId: "",
   socket: null,
+  connected: false,
   keyPair: null,
   publicJwk: null,
   privateJwk: null,
@@ -44,10 +46,18 @@ els.startBtn.addEventListener("click", async () => {
     return toast("ID 只能包含字母、数字、下划线和短横线，长度 3-32。");
   }
 
-  await loadOrCreateIdentity(userId);
-  restoreFriends(userId);
-  renderFriends();
-  connect(userId);
+  try {
+    els.startBtn.disabled = true;
+    await loadOrCreateIdentity(userId);
+    restoreFriends(userId);
+    await registerProfile();
+    renderFriends();
+    connect(userId);
+  } catch {
+    toast("进入失败：服务端不可用或注册公钥失败。");
+  } finally {
+    els.startBtn.disabled = false;
+  }
 });
 
 els.copyInviteBtn.addEventListener("click", async () => {
@@ -57,36 +67,49 @@ els.copyInviteBtn.addEventListener("click", async () => {
 });
 
 els.addFriendBtn.addEventListener("click", async () => {
+  if (!state.userId) return toast("请先输入你的 ID 并进入。");
   try {
-    const invite = parseInvite(els.friendInvite.value.trim());
-    if (!invite.userId || !invite.publicKey) throw new Error("bad invite");
-    if (invite.userId === state.userId) return toast("不能添加自己。");
-    if (!state.userId) return toast("请先输入你的 ID 并进入。");
-    state.friends.set(invite.userId, invite);
+    const friend = await resolveFriend();
+    if (!friend.userId || !friend.publicKey) throw new Error("bad friend");
+    if (friend.userId === state.userId) return toast("不能添加自己。");
+    const saved = await api("/api/friends", {
+      method: "POST",
+      body: JSON.stringify({ userId: state.userId, friend })
+    });
+    mergeFriends(saved.friends);
     saveFriends();
     renderFriends();
+    els.friendId.value = "";
     els.friendInvite.value = "";
-    selectFriend(invite.userId);
+    selectFriend(friend.userId);
+    toast(`已添加好友：${friend.userId}`);
   } catch {
-    toast("邀请代码无法识别。");
+    toast("添加失败：请确认好友 ID 已进入过系统，或粘贴完整邀请代码。");
   }
 });
 
 els.messageForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = els.messageInput.value.trim();
-  if (!text || !state.activeFriendId || !state.socket) return;
+  if (!text) return;
+  if (!state.activeFriendId) return toast("请先选择好友。");
+  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) return toast("连接未就绪，消息没有发送。");
   const friend = state.friends.get(state.activeFriendId);
+  if (!friend?.publicKey) return toast("缺少好友公钥，无法加密。请重新添加好友。");
   const burnAfter = Number(els.burnAfter.value);
-  const encrypted = await encryptForFriend(friend, { text, burnAfter, sentAt: Date.now() });
-  state.socket.send(JSON.stringify({
-    type: "message",
-    from: state.userId,
-    to: friend.userId,
-    encrypted
-  }));
-  addMessage({ from: state.userId, text, burnAfter, mine: true });
-  els.messageInput.value = "";
+  try {
+    const encrypted = await encryptForFriend(friend, { text, burnAfter, sentAt: Date.now() });
+    state.socket.send(JSON.stringify({
+      type: "message",
+      from: state.userId,
+      to: friend.userId,
+      encrypted
+    }));
+    addMessage({ from: state.userId, text, burnAfter, mine: true, status: "已加密发送" });
+    els.messageInput.value = "";
+  } catch {
+    toast("加密失败，消息没有发送。");
+  }
 });
 
 async function loadOrCreateIdentity(userId) {
@@ -130,21 +153,43 @@ async function loadOrCreateIdentity(userId) {
   els.inviteCode.value = makeInvite(userId, state.publicJwk);
 }
 
+async function registerProfile() {
+  const result = await api("/api/register", {
+    method: "POST",
+    body: JSON.stringify({ userId: state.userId, publicKey: state.publicJwk })
+  });
+  mergeFriends(result.friends);
+  saveFriends();
+}
+
 function connect(userId) {
   state.socket?.close();
+  state.connected = false;
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   state.socket = new WebSocket(`${protocol}://${location.host}`);
   els.connectionState.textContent = "正在连接...";
 
   state.socket.addEventListener("open", () => {
-    state.socket.send(JSON.stringify({ type: "hello", userId }));
+    state.socket.send(JSON.stringify({ type: "hello", userId, publicKey: state.publicJwk }));
   });
 
   state.socket.addEventListener("message", async (event) => {
     const packet = JSON.parse(event.data);
     if (packet.type === "ready") {
+      state.connected = true;
+      mergeFriends(packet.friends);
+      saveFriends();
+      renderFriends();
       els.connectionState.textContent = `已连接：${packet.userId}`;
       els.securityStatus.textContent = "端到端加密已启用";
+      return;
+    }
+    if (packet.type === "sent") {
+      toast(`密文已交给中继：${packet.to}`);
+      return;
+    }
+    if (packet.type === "error") {
+      toast(packet.message || "服务端返回错误。");
       return;
     }
     if (packet.type === "message") {
@@ -153,8 +198,13 @@ function connect(userId) {
   });
 
   state.socket.addEventListener("close", () => {
+    state.connected = false;
     els.connectionState.textContent = "连接已断开";
     els.securityStatus.textContent = "等待重新连接";
+  });
+
+  state.socket.addEventListener("error", () => {
+    toast("WebSocket 连接失败。");
   });
 }
 
@@ -167,7 +217,7 @@ async function handleEncryptedMessage(packet) {
   try {
     const payload = await decryptFromFriend(friend, packet.encrypted);
     if (!state.activeFriendId) selectFriend(friend.userId);
-    addMessage({ from: friend.userId, text: payload.text, burnAfter: payload.burnAfter, mine: false });
+    addMessage({ from: friend.userId, text: payload.text, burnAfter: payload.burnAfter, mine: false, status: "已解密" });
   } catch {
     toast("收到一条无法解密的消息。");
   }
@@ -213,13 +263,13 @@ async function deriveAesKey(friendPublicJwk) {
   );
 }
 
-function addMessage({ from, text, burnAfter, mine }) {
+function addMessage({ from, text, burnAfter, mine, status }) {
   if (els.messages.querySelector(".empty")) els.messages.innerHTML = "";
   const node = document.createElement("article");
   node.className = `message ${mine ? "mine" : ""}`;
   node.innerHTML = `
     <div></div>
-    <p class="meta"><span class="burning"></span> · ${escapeHtml(from)}</p>
+    <p class="meta"><span class="burning"></span> · ${escapeHtml(from)} · ${escapeHtml(status || "本地显示")}</p>
   `;
   node.firstElementChild.textContent = text;
   els.messages.append(node);
@@ -243,8 +293,9 @@ function addMessage({ from, text, burnAfter, mine }) {
 function selectFriend(userId) {
   state.activeFriendId = userId;
   els.chatTitle.textContent = userId;
-  els.messageInput.disabled = false;
-  els.sendBtn.disabled = false;
+  const canSend = Boolean(state.userId && state.friends.get(userId));
+  els.messageInput.disabled = !canSend;
+  els.sendBtn.disabled = !canSend;
   renderFriends();
 }
 
@@ -257,10 +308,22 @@ function renderFriends() {
   for (const friend of state.friends.values()) {
     const row = document.createElement("div");
     row.className = `friend ${friend.userId === state.activeFriendId ? "active" : ""}`;
-    row.innerHTML = `<strong>${escapeHtml(friend.userId)}</strong><button type="button">聊天</button>`;
+    row.innerHTML = `
+      <span><strong>${escapeHtml(friend.userId)}</strong><small>公钥已保存</small></span>
+      <button type="button">聊天</button>
+    `;
     row.querySelector("button").addEventListener("click", () => selectFriend(friend.userId));
     els.friendList.append(row);
   }
+}
+
+async function resolveFriend() {
+  const rawInvite = els.friendInvite.value.trim();
+  const rawId = els.friendId.value.trim();
+  if (rawInvite) return parseInvite(rawInvite);
+  if (!/^[a-zA-Z0-9_-]{3,32}$/.test(rawId)) throw new Error("bad id");
+  const result = await api(`/api/users/${encodeURIComponent(rawId)}`);
+  return { userId: result.userId, publicKey: result.publicKey };
 }
 
 function makeInvite(userId, publicKey) {
@@ -284,6 +347,25 @@ function restoreFriends(userId) {
   } catch {
     localStorage.removeItem(`secureBurnFriends:${userId}`);
   }
+}
+
+function mergeFriends(friends = []) {
+  for (const friend of friends) {
+    if (friend?.userId && friend?.publicKey) state.friends.set(friend.userId, friend);
+  }
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: {
+      "content-type": "application/json",
+      ...(options.headers || {})
+    }
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.ok === false) throw new Error(body.error || "Request failed");
+  return body;
 }
 
 function loadProfile(userId) {

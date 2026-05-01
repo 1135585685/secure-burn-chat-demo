@@ -28,7 +28,7 @@
 
         <section class="panel">
           <div class="section-title">
-            <h2>我的邀请</h2>
+            <h2>邀请代码</h2>
             <button id="copyInviteBtn" class="icon-btn" title="复制邀请">复制</button>
           </div>
           <textarea id="inviteCode" readonly placeholder="进入后生成邀请代码"></textarea>
@@ -39,7 +39,8 @@
             <h2>添加好友</h2>
             <button id="addFriendBtn">添加</button>
           </div>
-          <textarea id="friendInvite" placeholder="粘贴对方邀请代码"></textarea>
+          <input id="friendId" maxlength="32" placeholder="输入好友 ID，例如 bob" autocomplete="off" />
+          <textarea id="friendInvite" placeholder="或粘贴对方邀请代码"></textarea>
         </section>
 
         <section class="panel friend-panel">
@@ -54,7 +55,7 @@
             <p class="eyebrow">当前会话</p>
             <h2 id="chatTitle">请选择好友</h2>
           </div>
-          <div class="status-pill" id="securityStatus">本地加密待命</div>
+          <div class="status-pill" id="securityStatus">等待身份密钥</div>
         </header>
 
         <div id="messages" class="messages"></div>
