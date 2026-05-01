@@ -117,6 +117,17 @@ async function handleApi(req, res, url) {
     return json(res, 200, { ok: true, userId, publicKey: user.publicKey });
   }
 
+  if (req.method === "DELETE" && url.pathname === "/api/users") {
+    const body = await readJson(req);
+    const userId = sanitizeId(body.userId);
+    if (!userId) return json(res, 400, { ok: false, error: "Invalid user id" });
+    await deleteUser(userId);
+    sendUser(userId, { type: "accountDeleted" });
+    const socket = clients.get(userId);
+    if (socket) socket.close(1000, "account deleted");
+    return json(res, 200, { ok: true });
+  }
+
   if (req.method === "GET" && url.pathname.startsWith("/api/friends/")) {
     const userId = sanitizeId(decodeURIComponent(url.pathname.split("/").pop() || ""));
     if (!userId) return json(res, 400, { ok: false, error: "Invalid user id" });
@@ -183,6 +194,25 @@ async function addFriend(userId, friendId) {
 async function removeFriend(userId, friendId) {
   store.friends[userId] = (store.friends[userId] || []).filter((id) => id !== friendId);
   await saveStore();
+}
+
+async function deleteUser(userId) {
+  const affected = new Set([
+    ...(store.friends[userId] || []),
+    ...Object.entries(store.friends)
+      .filter(([, friends]) => friends.includes(userId))
+      .map(([id]) => id)
+  ]);
+  delete store.users[userId];
+  delete store.friends[userId];
+  for (const id of Object.keys(store.friends)) {
+    store.friends[id] = store.friends[id].filter((friendId) => friendId !== userId);
+  }
+  offlineQueues.delete(userId);
+  await saveStore();
+  for (const id of affected) {
+    sendUser(id, { type: "friends", friends: getFriends(id) });
+  }
 }
 
 function getFriends(userId) {

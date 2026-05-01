@@ -1,6 +1,9 @@
 const els = {
   userId: document.querySelector("#userId"),
   startBtn: document.querySelector("#startBtn"),
+  logoutBtn: document.querySelector("#logoutBtn"),
+  wipeBtn: document.querySelector("#wipeBtn"),
+  sessionActions: document.querySelector("#sessionActions"),
   connectionState: document.querySelector("#connectionState"),
   inviteCode: document.querySelector("#inviteCode"),
   copyInviteBtn: document.querySelector("#copyInviteBtn"),
@@ -57,12 +60,36 @@ els.startBtn.addEventListener("click", async () => {
     restoreFriends(userId);
     await registerProfile();
     renderFriends();
+    renderSession();
     connect(userId);
   } catch {
     toast("进入失败：服务端不可用或注册公钥失败。");
   } finally {
     els.startBtn.disabled = false;
   }
+});
+
+els.logoutBtn.addEventListener("click", () => {
+  logout();
+  toast("已退出，本机当前会话已清空。");
+});
+
+els.wipeBtn.addEventListener("click", async () => {
+  if (!state.userId) return;
+  const confirmed = window.confirm("这会删除本机身份密钥、好友缓存、当前消息，并从服务端删除你的用户资料和好友关系。确认继续？");
+  if (!confirmed) return;
+  const userId = state.userId;
+  try {
+    await api("/api/users", {
+      method: "DELETE",
+      body: JSON.stringify({ userId })
+    });
+  } catch {
+    toast("服务端删除失败，本机记录仍会清除。");
+  }
+  wipeLocalUser(userId);
+  resetSession();
+  toast("所有本机记录已删除，服务端资料已请求删除。");
 });
 
 els.copyInviteBtn.addEventListener("click", async () => {
@@ -197,6 +224,13 @@ function connect(userId) {
       saveFriends();
       renderFriends();
       syncComposerState();
+      return;
+    }
+    if (packet.type === "accountDeleted") {
+      const userId = state.userId;
+      if (userId) wipeLocalUser(userId);
+      resetSession();
+      toast("账号记录已删除。");
       return;
     }
     if (packet.type === "sent") {
@@ -407,6 +441,48 @@ function replaceFriends(friends = []) {
 
 function markAllOffline() {
   for (const friend of state.friends.values()) friend.online = false;
+}
+
+function logout() {
+  state.socket?.close();
+  resetSession({ keepUserInput: true });
+}
+
+function resetSession({ keepUserInput = false } = {}) {
+  clearMessageTimer();
+  state.socket = null;
+  state.connected = false;
+  state.keyPair = null;
+  state.publicJwk = null;
+  state.privateJwk = null;
+  state.userId = "";
+  state.friends.clear();
+  state.activeFriendId = "";
+  els.inviteCode.value = "";
+  if (!keepUserInput) els.userId.value = "";
+  els.friendId.value = "";
+  els.friendInvite.value = "";
+  els.chatTitle.textContent = "请选择好友";
+  els.securityStatus.textContent = "等待身份密钥";
+  els.connectionState.textContent = "未连接";
+  showEmpty("已退出。输入 ID 后可重新进入。");
+  renderSession();
+  renderFriends();
+  syncComposerState();
+}
+
+function renderSession() {
+  const loggedIn = Boolean(state.userId);
+  els.sessionActions.hidden = !loggedIn;
+  els.startBtn.textContent = loggedIn ? "切换" : "进入";
+}
+
+function wipeLocalUser(userId) {
+  localStorage.removeItem(`secureBurnProfile:${userId}`);
+  localStorage.removeItem(`secureBurnFriends:${userId}`);
+  if (localStorage.getItem("secureBurnLastUserId") === userId) {
+    localStorage.removeItem("secureBurnLastUserId");
+  }
 }
 
 function syncComposerState() {

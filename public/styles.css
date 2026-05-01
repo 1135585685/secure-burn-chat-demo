@@ -182,6 +182,18 @@ h2 {
   margin-top: 8px;
 }
 
+.session-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.secondary-btn {
+  color: var(--accent-dark);
+  background: var(--surface-strong);
+}
+
 .section-title {
   display: flex;
   align-items: center;
@@ -298,6 +310,10 @@ h2 {
   color: var(--danger);
   background: #fff1ef;
   font-size: 12px;
+}
+
+.session-actions .danger-btn {
+  font-size: 13px;
 }
 
 .chat {
@@ -423,7 +439,8 @@ h2 {
 
 @media (max-width: 520px) {
   .inline-form,
-  .composer-actions {
+  .composer-actions,
+  .session-actions {
     grid-template-columns: 1fr;
   }
 
