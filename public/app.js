@@ -481,7 +481,7 @@ function resetSession({ keepUserInput = false } = {}) {
 function renderSession() {
   const loggedIn = Boolean(state.userId);
   els.sessionActions.hidden = !loggedIn;
-  els.startBtn.textContent = loggedIn ? "切换" : "进入";
+  els.startBtn.textContent = loggedIn ? "登入" : "进入";
 }
 
 function wipeLocalUser(userId) {
