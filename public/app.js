@@ -8,14 +8,17 @@ const els = {
   friendInvite: document.querySelector("#friendInvite"),
   addFriendBtn: document.querySelector("#addFriendBtn"),
   friendList: document.querySelector("#friendList"),
+  friendSummary: document.querySelector("#friendSummary"),
   chatTitle: document.querySelector("#chatTitle"),
+  chatSubtitle: document.querySelector("#chatSubtitle"),
   securityStatus: document.querySelector("#securityStatus"),
   messages: document.querySelector("#messages"),
   messageForm: document.querySelector("#messageForm"),
   messageInput: document.querySelector("#messageInput"),
-  burnAfter: document.querySelector("#burnAfter"),
   sendBtn: document.querySelector("#sendBtn")
 };
+
+const MESSAGE_TTL_SECONDS = 15 * 60;
 
 const state = {
   userId: "",
@@ -25,7 +28,8 @@ const state = {
   publicJwk: null,
   privateJwk: null,
   friends: new Map(),
-  activeFriendId: ""
+  activeFriendId: "",
+  messageTimer: null
 };
 
 const encoder = new TextEncoder();
@@ -34,10 +38,11 @@ const decoder = new TextDecoder();
 boot();
 
 async function boot() {
-  els.messages.innerHTML = `<p class="empty">先输入你的 ID 进入，再用邀请代码添加好友。</p>`;
+  showEmpty("先输入你的 ID 进入，再添加好友。");
   const lastUserId = localStorage.getItem("secureBurnLastUserId");
   if (lastUserId) els.userId.value = lastUserId;
   renderFriends();
+  syncComposerState();
 }
 
 els.startBtn.addEventListener("click", async () => {
@@ -76,7 +81,7 @@ els.addFriendBtn.addEventListener("click", async () => {
       method: "POST",
       body: JSON.stringify({ userId: state.userId, friend })
     });
-    mergeFriends(saved.friends);
+    replaceFriends(saved.friends);
     saveFriends();
     renderFriends();
     els.friendId.value = "";
@@ -96,7 +101,9 @@ els.messageForm.addEventListener("submit", async (event) => {
   if (!state.socket || state.socket.readyState !== WebSocket.OPEN) return toast("连接未就绪，消息没有发送。");
   const friend = state.friends.get(state.activeFriendId);
   if (!friend?.publicKey) return toast("缺少好友公钥，无法加密。请重新添加好友。");
-  const burnAfter = Number(els.burnAfter.value);
+  if (!friend.confirmed) return toast("消息未发送：需要双方互相添加好友。");
+  if (!friend.online) return toast("消息未发送：好友当前不在线。");
+  const burnAfter = MESSAGE_TTL_SECONDS;
   try {
     const encrypted = await encryptForFriend(friend, { text, burnAfter, sentAt: Date.now() });
     state.socket.send(JSON.stringify({
@@ -158,7 +165,7 @@ async function registerProfile() {
     method: "POST",
     body: JSON.stringify({ userId: state.userId, publicKey: state.publicJwk })
   });
-  mergeFriends(result.friends);
+  replaceFriends(result.friends);
   saveFriends();
 }
 
@@ -182,6 +189,14 @@ function connect(userId) {
       renderFriends();
       els.connectionState.textContent = `已连接：${packet.userId}`;
       els.securityStatus.textContent = "端到端加密已启用";
+      syncComposerState();
+      return;
+    }
+    if (packet.type === "friends") {
+      replaceFriends(packet.friends);
+      saveFriends();
+      renderFriends();
+      syncComposerState();
       return;
     }
     if (packet.type === "sent") {
@@ -201,6 +216,9 @@ function connect(userId) {
     state.connected = false;
     els.connectionState.textContent = "连接已断开";
     els.securityStatus.textContent = "等待重新连接";
+    markAllOffline();
+    renderFriends();
+    syncComposerState();
   });
 
   state.socket.addEventListener("error", () => {
@@ -217,7 +235,7 @@ async function handleEncryptedMessage(packet) {
   try {
     const payload = await decryptFromFriend(friend, packet.encrypted);
     if (!state.activeFriendId) selectFriend(friend.userId);
-    addMessage({ from: friend.userId, text: payload.text, burnAfter: payload.burnAfter, mine: false, status: "已解密" });
+    addMessage({ from: friend.userId, text: payload.text, burnAfter: payload.burnAfter || MESSAGE_TTL_SECONDS, mine: false, status: "已解密" });
   } catch {
     toast("收到一条无法解密的消息。");
   }
@@ -264,7 +282,8 @@ async function deriveAesKey(friendPublicJwk) {
 }
 
 function addMessage({ from, text, burnAfter, mine, status }) {
-  if (els.messages.querySelector(".empty")) els.messages.innerHTML = "";
+  clearMessageTimer();
+  els.messages.innerHTML = "";
   const node = document.createElement("article");
   node.className = `message ${mine ? "mine" : ""}`;
   node.innerHTML = `
@@ -277,15 +296,12 @@ function addMessage({ from, text, burnAfter, mine, status }) {
 
   const burning = node.querySelector(".burning");
   const expiresAt = Date.now() + burnAfter * 1000;
-  const timer = setInterval(() => {
+  state.messageTimer = setInterval(() => {
     const left = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
-    burning.textContent = `${left}s 后焚毁`;
+    burning.textContent = `${formatCountdown(left)} 后消失`;
     if (left <= 0) {
-      clearInterval(timer);
-      node.remove();
-      if (!els.messages.children.length) {
-        els.messages.innerHTML = `<p class="empty">消息已焚毁，本地不保留聊天记录。</p>`;
-      }
+      clearMessageTimer();
+      showEmpty("单消息窗口已清空，本地不保留聊天记录。");
     }
   }, 250);
 }
@@ -293,15 +309,14 @@ function addMessage({ from, text, burnAfter, mine, status }) {
 function selectFriend(userId) {
   state.activeFriendId = userId;
   els.chatTitle.textContent = userId;
-  const canSend = Boolean(state.userId && state.friends.get(userId));
-  els.messageInput.disabled = !canSend;
-  els.sendBtn.disabled = !canSend;
+  syncComposerState();
   renderFriends();
 }
 
 function renderFriends() {
+  els.friendSummary.textContent = `${state.friends.size} 位`;
   if (!state.friends.size) {
-    els.friendList.innerHTML = `<p class="hint">暂无好友。用邀请代码添加一个联系人。</p>`;
+    els.friendList.innerHTML = `<p class="hint">暂无好友。用 ID 或邀请代码添加一个联系人。</p>`;
     return;
   }
   els.friendList.innerHTML = "";
@@ -309,11 +324,41 @@ function renderFriends() {
     const row = document.createElement("div");
     row.className = `friend ${friend.userId === state.activeFriendId ? "active" : ""}`;
     row.innerHTML = `
-      <span><strong>${escapeHtml(friend.userId)}</strong><small>公钥已保存</small></span>
-      <button type="button">聊天</button>
+      <button class="friend-main" type="button">
+        <span class="presence ${friend.online ? "online" : friend.confirmed ? "offline" : "pending"}"></span>
+        <span>
+          <strong>${escapeHtml(friend.userId)}</strong>
+          <small>${escapeHtml(friendLabel(friend))}</small>
+        </span>
+      </button>
+      <button class="danger-btn" type="button" title="删除好友">删除</button>
     `;
-    row.querySelector("button").addEventListener("click", () => selectFriend(friend.userId));
+    row.querySelector(".friend-main").addEventListener("click", () => selectFriend(friend.userId));
+    row.querySelector(".danger-btn").addEventListener("click", () => deleteFriend(friend.userId));
     els.friendList.append(row);
+  }
+}
+
+async function deleteFriend(friendId) {
+  if (!state.userId) return;
+  try {
+    const result = await api("/api/friends", {
+      method: "DELETE",
+      body: JSON.stringify({ userId: state.userId, friendId })
+    });
+    replaceFriends(result.friends);
+    saveFriends();
+    if (state.activeFriendId === friendId) {
+      state.activeFriendId = "";
+      els.chatTitle.textContent = "请选择好友";
+      els.chatSubtitle.textContent = "双方互相添加且在线后才可发送。";
+      showEmpty("好友已删除。");
+    }
+    renderFriends();
+    syncComposerState();
+    toast(`已删除好友：${friendId}`);
+  } catch {
+    toast("删除失败，请稍后再试。");
   }
 }
 
@@ -353,6 +398,52 @@ function mergeFriends(friends = []) {
   for (const friend of friends) {
     if (friend?.userId && friend?.publicKey) state.friends.set(friend.userId, friend);
   }
+}
+
+function replaceFriends(friends = []) {
+  state.friends.clear();
+  mergeFriends(friends);
+}
+
+function markAllOffline() {
+  for (const friend of state.friends.values()) friend.online = false;
+}
+
+function syncComposerState() {
+  const friend = state.friends.get(state.activeFriendId);
+  const canSend = Boolean(state.userId && friend?.confirmed && friend?.online && state.connected);
+  els.messageInput.disabled = !canSend;
+  els.sendBtn.disabled = !canSend;
+  if (!state.activeFriendId) {
+    els.chatSubtitle.textContent = "双方互相添加且在线后才可发送。";
+  } else if (!friend?.confirmed) {
+    els.chatSubtitle.textContent = "等待对方也添加你，完成双向确认。";
+  } else if (!friend.online) {
+    els.chatSubtitle.textContent = "好友离线，暂不可发送。";
+  } else {
+    els.chatSubtitle.textContent = "双向确认且在线，可发送端到端加密消息。";
+  }
+}
+
+function friendLabel(friend) {
+  if (!friend.confirmed) return "待对方确认";
+  return friend.online ? "在线，可发送" : "离线";
+}
+
+function clearMessageTimer() {
+  if (state.messageTimer) clearInterval(state.messageTimer);
+  state.messageTimer = null;
+}
+
+function showEmpty(text) {
+  clearMessageTimer();
+  els.messages.innerHTML = `<p class="empty">${escapeHtml(text)}</p>`;
+}
+
+function formatCountdown(totalSeconds) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 async function api(path, options = {}) {

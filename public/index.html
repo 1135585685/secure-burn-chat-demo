@@ -13,7 +13,7 @@
           <div class="mark" aria-hidden="true">SB</div>
           <div>
             <h1>Secure Burn</h1>
-            <p>端到端加密 · 阅后即焚 · 服务端不存明文</p>
+            <p>端到端加密 · 单消息窗口 · 双向确认</p>
           </div>
         </section>
 
@@ -44,7 +44,10 @@
         </section>
 
         <section class="panel friend-panel">
-          <h2>好友</h2>
+          <div class="section-title compact-title">
+            <h2>好友</h2>
+            <span id="friendSummary" class="mini-pill">0 位</span>
+          </div>
           <div id="friendList" class="friend-list"></div>
         </section>
       </aside>
@@ -54,6 +57,7 @@
           <div>
             <p class="eyebrow">当前会话</p>
             <h2 id="chatTitle">请选择好友</h2>
+            <p id="chatSubtitle" class="chat-subtitle">双方互相添加且在线后才可发送。</p>
           </div>
           <div class="status-pill" id="securityStatus">等待身份密钥</div>
         </header>
@@ -63,14 +67,7 @@
         <form id="messageForm" class="composer">
           <textarea id="messageInput" placeholder="输入消息，发送前会在浏览器内加密" disabled></textarea>
           <div class="composer-actions">
-            <label>
-              焚毁时间
-              <select id="burnAfter">
-                <option value="5">5 秒</option>
-                <option value="15" selected>15 秒</option>
-                <option value="60">60 秒</option>
-              </select>
-            </label>
+            <p class="composer-note">单消息窗口：新消息会覆盖旧消息，最后一条 15 分钟后自动消失。</p>
             <button id="sendBtn" disabled>发送密文</button>
           </div>
         </form>

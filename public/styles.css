@@ -3,6 +3,7 @@
   --bg: #f7f3ec;
   --surface: #ffffff;
   --surface-strong: #eef6f2;
+  --surface-soft: #f8faf8;
   --ink: #17211d;
   --muted: #66736d;
   --line: #d9dfda;
@@ -44,6 +45,10 @@ button {
   font-weight: 700;
   min-height: 40px;
   padding: 0 14px;
+}
+
+button:hover:not(:disabled) {
+  filter: brightness(0.97);
 }
 
 button:disabled {
@@ -185,6 +190,20 @@ h2 {
   margin-bottom: 8px;
 }
 
+.compact-title {
+  margin-bottom: 0;
+}
+
+.mini-pill {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .icon-btn {
   min-height: 32px;
   padding: 0 10px;
@@ -204,17 +223,31 @@ h2 {
 }
 
 .friend {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 10px;
+  padding: 6px;
   background: #fbfcfb;
 }
 
-.friend span {
+.friend-main {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  min-width: 0;
+  border-radius: 6px;
+  color: var(--ink);
+  background: transparent;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.friend-main span:last-child {
   display: grid;
   gap: 2px;
   min-width: 0;
@@ -241,6 +274,32 @@ h2 {
   padding: 0 10px;
 }
 
+.presence {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+.presence.online {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(18, 113, 91, 0.12);
+}
+
+.presence.offline {
+  background: #9aa5a0;
+}
+
+.presence.pending {
+  background: var(--warm);
+}
+
+.danger-btn {
+  color: var(--danger);
+  background: #fff1ef;
+  font-size: 12px;
+}
+
 .chat {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
@@ -259,6 +318,12 @@ h2 {
 .chat-header h2 {
   margin-top: 4px;
   font-size: 22px;
+}
+
+.chat-subtitle {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .status-pill {
@@ -328,10 +393,16 @@ h2 {
 
 .composer-actions {
   display: grid;
-  grid-template-columns: 180px auto;
-  justify-content: end;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 10px;
   margin-top: 10px;
+}
+
+.composer-note {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 @media (max-width: 860px) {

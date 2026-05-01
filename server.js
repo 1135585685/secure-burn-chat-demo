@@ -62,6 +62,7 @@ wss.on("connection", (socket) => {
       }
       clients.set(userId, socket);
       send(socket, { type: "ready", userId, friends: getFriends(userId) });
+      broadcastPresence(userId);
       flushOffline(userId);
       return;
     }
@@ -70,6 +71,12 @@ wss.on("connection", (socket) => {
       const from = sanitizeId(packet.from);
       const to = sanitizeId(packet.to);
       if (!from || !to || from !== userId || !packet.encrypted) return;
+      if (!areMutualFriends(from, to)) {
+        return send(socket, { type: "error", message: "消息未发送：需要双方互相添加好友。" });
+      }
+      if (!isOnline(to)) {
+        return send(socket, { type: "error", message: "消息未发送：好友当前不在线。" });
+      }
 
       const sealed = {
         type: "message",
@@ -86,6 +93,7 @@ wss.on("connection", (socket) => {
 
   socket.on("close", () => {
     if (userId && clients.get(userId) === socket) clients.delete(userId);
+    if (userId) broadcastPresence(userId);
   });
 });
 
@@ -115,6 +123,17 @@ async function handleApi(req, res, url) {
     return json(res, 200, { ok: true, friends: getFriends(userId) });
   }
 
+  if (req.method === "DELETE" && url.pathname === "/api/friends") {
+    const body = await readJson(req);
+    const userId = sanitizeId(body.userId);
+    const friendId = sanitizeId(body.friendId);
+    if (!userId || !friendId) return json(res, 400, { ok: false, error: "Invalid friend" });
+    await removeFriend(userId, friendId);
+    sendUser(friendId, { type: "friends", friends: getFriends(friendId) });
+    sendUser(userId, { type: "friends", friends: getFriends(userId) });
+    return json(res, 200, { ok: true, friends: getFriends(userId) });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/friends") {
     const body = await readJson(req);
     const userId = sanitizeId(body.userId);
@@ -125,6 +144,7 @@ async function handleApi(req, res, url) {
     }
     await registerUser(friendId, publicKey);
     await addFriend(userId, friendId);
+    sendUser(friendId, { type: "friends", friends: getFriends(friendId) });
     return json(res, 200, { ok: true, friends: getFriends(userId) });
   }
 
@@ -160,11 +180,18 @@ async function addFriend(userId, friendId) {
   await saveStore();
 }
 
+async function removeFriend(userId, friendId) {
+  store.friends[userId] = (store.friends[userId] || []).filter((id) => id !== friendId);
+  await saveStore();
+}
+
 function getFriends(userId) {
   return (store.friends[userId] || [])
     .map((friendId) => store.users[friendId] ? {
       userId: friendId,
-      publicKey: store.users[friendId].publicKey
+      publicKey: store.users[friendId].publicKey,
+      confirmed: areMutualFriends(userId, friendId),
+      online: areMutualFriends(userId, friendId) && isOnline(friendId)
     } : null)
     .filter(Boolean);
 }
@@ -223,7 +250,32 @@ function flushOffline(userId) {
 }
 
 function send(socket, packet) {
-  if (socket?.readyState === socket.OPEN) socket.send(JSON.stringify(packet));
+  if (socket && socket.readyState === socket.OPEN) socket.send(JSON.stringify(packet));
+}
+
+function sendUser(userId, packet) {
+  send(clients.get(userId), packet);
+}
+
+function isOnline(userId) {
+  const socket = clients.get(userId);
+  return Boolean(socket && socket.readyState === socket.OPEN);
+}
+
+function areMutualFriends(a, b) {
+  return Boolean((store.friends[a] || []).includes(b) && (store.friends[b] || []).includes(a));
+}
+
+function broadcastPresence(changedUserId) {
+  const visibleTo = new Set([
+    ...(store.friends[changedUserId] || []),
+    ...Object.entries(store.friends)
+      .filter(([, friends]) => friends.includes(changedUserId))
+      .map(([userId]) => userId)
+  ]);
+  for (const userId of visibleTo) {
+    sendUser(userId, { type: "friends", friends: getFriends(userId) });
+  }
 }
 
 function sanitizeId(value) {
