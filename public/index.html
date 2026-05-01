@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Secure Burn Chat Demo</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <aside class="sidebar">
+        <section class="brand">
+          <div class="mark" aria-hidden="true">SB</div>
+          <div>
+            <h1>Secure Burn</h1>
+            <p>端到端加密 · 阅后即焚 · 服务端不存明文</p>
+          </div>
+        </section>
+
+        <section class="panel identity-panel">
+          <label for="userId">你的 ID</label>
+          <div class="inline-form">
+            <input id="userId" maxlength="32" placeholder="例如 alice" autocomplete="off" />
+            <button id="startBtn">进入</button>
+          </div>
+          <p id="connectionState" class="hint">未连接</p>
+        </section>
+
+        <section class="panel">
+          <div class="section-title">
+            <h2>我的邀请</h2>
+            <button id="copyInviteBtn" class="icon-btn" title="复制邀请">复制</button>
+          </div>
+          <textarea id="inviteCode" readonly placeholder="进入后生成邀请代码"></textarea>
+        </section>
+
+        <section class="panel">
+          <div class="section-title">
+            <h2>添加好友</h2>
+            <button id="addFriendBtn">添加</button>
+          </div>
+          <textarea id="friendInvite" placeholder="粘贴对方邀请代码"></textarea>
+        </section>
+
+        <section class="panel friend-panel">
+          <h2>好友</h2>
+          <div id="friendList" class="friend-list"></div>
+        </section>
+      </aside>
+
+      <section class="chat">
+        <header class="chat-header">
+          <div>
+            <p class="eyebrow">当前会话</p>
+            <h2 id="chatTitle">请选择好友</h2>
+          </div>
+          <div class="status-pill" id="securityStatus">本地加密待命</div>
+        </header>
+
+        <div id="messages" class="messages"></div>
+
+        <form id="messageForm" class="composer">
+          <textarea id="messageInput" placeholder="输入消息，发送前会在浏览器内加密" disabled></textarea>
+          <div class="composer-actions">
+            <label>
+              焚毁时间
+              <select id="burnAfter">
+                <option value="5">5 秒</option>
+                <option value="15" selected>15 秒</option>
+                <option value="60">60 秒</option>
+              </select>
+            </label>
+            <button id="sendBtn" disabled>发送密文</button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
