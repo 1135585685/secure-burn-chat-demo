@@ -102,6 +102,7 @@ els.copyInviteBtn.addEventListener("click", async () => {
 els.addFriendBtn.addEventListener("click", async () => {
   if (!state.userId) return toast("请先输入你的 ID 并进入。");
   try {
+    await registerProfile();
     const friend = await resolveFriend();
     if (!friend.userId || !friend.publicKey) throw new Error("bad friend");
     if (friend.userId === state.userId) return toast("不能添加自己。");
@@ -117,7 +118,7 @@ els.addFriendBtn.addEventListener("click", async () => {
     selectFriend(friend.userId);
     toast(`已添加好友：${friend.userId}`);
   } catch {
-    toast("添加失败：请确认好友 ID 已进入过系统，或粘贴完整邀请代码。");
+    toast("添加失败：对方需要先登入一次，或粘贴对方完整邀请代码。");
   }
 });
 
@@ -407,8 +408,16 @@ async function resolveFriend() {
   const rawId = els.friendId.value.trim();
   if (rawInvite) return parseInvite(rawInvite);
   if (!/^[a-zA-Z0-9_-]{3,32}$/.test(rawId)) throw new Error("bad id");
-  const result = await api(`/api/users/${encodeURIComponent(rawId)}`);
-  return { userId: result.userId, publicKey: result.publicKey };
+  try {
+    const result = await api(`/api/users/${encodeURIComponent(rawId)}`);
+    return { userId: result.userId, publicKey: result.publicKey };
+  } catch (error) {
+    const localProfile = loadProfile(rawId);
+    if (localProfile?.publicJwk) {
+      return { userId: rawId, publicKey: localProfile.publicJwk };
+    }
+    throw error;
+  }
 }
 
 function makeInvite(userId, publicKey) {

@@ -110,13 +110,6 @@ async function handleApi(req, res, url) {
     return json(res, 200, { ok: true, userId, friends: getFriends(userId) });
   }
 
-  if (req.method === "GET" && url.pathname.startsWith("/api/users/")) {
-    const userId = sanitizeId(decodeURIComponent(url.pathname.split("/").pop() || ""));
-    const user = userId ? store.users[userId] : null;
-    if (!user) return json(res, 404, { ok: false, error: "User not found" });
-    return json(res, 200, { ok: true, userId, publicKey: user.publicKey });
-  }
-
   if (req.method === "DELETE" && url.pathname === "/api/users") {
     const body = await readJson(req);
     const userId = sanitizeId(body.userId);
@@ -126,6 +119,13 @@ async function handleApi(req, res, url) {
     const socket = clients.get(userId);
     if (socket) socket.close(1000, "account deleted");
     return json(res, 200, { ok: true });
+  }
+
+  if (req.method === "GET" && url.pathname.startsWith("/api/users/")) {
+    const userId = sanitizeId(decodeURIComponent(url.pathname.split("/").pop() || ""));
+    const user = userId ? store.users[userId] : null;
+    if (!user) return json(res, 404, { ok: false, error: "User not found" });
+    return json(res, 200, { ok: true, userId, publicKey: user.publicKey });
   }
 
   if (req.method === "GET" && url.pathname.startsWith("/api/friends/")) {
