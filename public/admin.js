@@ -14,6 +14,8 @@ const els = {
   edgeFriend: document.querySelector("#edgeFriend"),
   flowGraph: document.querySelector("#flowGraph"),
   flowEvents: document.querySelector("#flowEvents"),
+  captureWarning: document.querySelector("#captureWarning"),
+  messageCaptures: document.querySelector("#messageCaptures"),
   storeEditor: document.querySelector("#storeEditor"),
   saveStoreBtn: document.querySelector("#saveStoreBtn")
 };
@@ -74,6 +76,7 @@ function render(data, store) {
   renderUsers(data.users);
   renderEdges(data.friends);
   renderFlow(data.flowEvents);
+  renderCaptures(data.captureMessages, data.messageCaptures || []);
   els.storeEditor.value = JSON.stringify(store, null, 2);
 }
 
@@ -132,6 +135,30 @@ function renderFlow(events) {
       <code>${escapeHtml(JSON.stringify(event.details))}</code>
     </div>
   `).join("") || `<p class="status">暂无数据流事件。</p>`;
+}
+
+function renderCaptures(enabled, captures) {
+  els.captureWarning.textContent = enabled
+    ? "测试模式已开启：后台正在保存并展示消息明文副本与密文 body。不要在生产环境开启。"
+    : "测试模式未开启。若必须调试消息内容，请在服务端设置 ADMIN_CAPTURE_MESSAGES=true 后重启。";
+
+  if (!enabled) {
+    els.messageCaptures.innerHTML = "";
+    return;
+  }
+
+  els.messageCaptures.innerHTML = captures.slice().reverse().map((capture) => `
+    <article class="capture">
+      <header>
+        <strong>${escapeHtml(capture.from)} -> ${escapeHtml(capture.to)}</strong>
+        <span>${escapeHtml(capture.delivery)} · ${formatTime(capture.at)}</span>
+      </header>
+      <label>明文副本</label>
+      <pre>${escapeHtml(capture.debugPlaintext ?? "(未随消息提交明文副本)")}</pre>
+      <label>密文 body</label>
+      <pre>${escapeHtml(JSON.stringify(capture.encrypted, null, 2))}</pre>
+    </article>
+  `).join("") || `<p class="status">暂无捕获消息。</p>`;
 }
 
 function buildFlowNodes(events) {

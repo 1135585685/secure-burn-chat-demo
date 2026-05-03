@@ -227,6 +227,51 @@ h2 {
   overflow: auto;
 }
 
+.capture-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.capture {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfb;
+  padding: 12px;
+}
+
+.capture header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.capture header span,
+.capture label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.capture label {
+  display: block;
+  margin: 8px 0 4px;
+  font-weight: 800;
+}
+
+.capture pre {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .event {
   display: grid;
   grid-template-columns: 150px 190px 1fr;

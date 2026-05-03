@@ -12,14 +12,17 @@ const DATABASE_URL = process.env.DATABASE_URL || "";
 const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL || "";
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+const ADMIN_CAPTURE_MESSAGES = process.env.ADMIN_CAPTURE_MESSAGES === "true";
 const clients = new Map();
 const offlineQueues = new Map();
 const OFFLINE_TTL_MS = 30 * 1000;
 const MAX_OFFLINE_QUEUE_PER_USER = 20;
 const MAX_FLOW_EVENTS = 300;
+const MAX_MESSAGE_CAPTURES = 200;
 let store = { users: {}, friends: {} };
 let dbPool = null;
 const flowEvents = [];
+const messageCaptures = [];
 const usePostgres = Boolean(DATABASE_URL);
 const useUpstash = Boolean(UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN);
 
@@ -74,7 +77,7 @@ wss.on("connection", (socket) => {
         await registerUser(userId, packet.publicKey);
       }
       clients.set(userId, socket);
-      send(socket, { type: "ready", userId, friends: getFriends(userId) });
+      send(socket, { type: "ready", userId, friends: getFriends(userId), adminCaptureMessages: ADMIN_CAPTURE_MESSAGES });
       recordFlow("client.connected", { userId, onlineUsers: clients.size });
       broadcastPresence(userId);
       await flushOffline(userId);
@@ -101,6 +104,7 @@ wss.on("connection", (socket) => {
         createdAt: Date.now()
       };
       const delivery = await deliverOrQueue(sealed);
+      captureMessage({ packet, sealed, delivery });
       recordFlow("message.accepted", { from, to, delivery, messageId: sealed.id });
       send(socket, { type: "sent", id: sealed.id, to, delivery });
     }
@@ -200,7 +204,9 @@ async function handleAdminApi(req, res, url) {
       users: adminUsers(),
       friends: adminFriends(),
       offlineQueues: await adminOfflineQueues(),
-      flowEvents
+      flowEvents,
+      messageCaptures: ADMIN_CAPTURE_MESSAGES ? messageCaptures : [],
+      captureMessages: ADMIN_CAPTURE_MESSAGES
     });
   }
 
@@ -209,7 +215,9 @@ async function handleAdminApi(req, res, url) {
       ok: true,
       store: sanitizedStore(),
       offlineQueues: await adminOfflineQueues(),
-      flowEvents
+      flowEvents,
+      messageCaptures: ADMIN_CAPTURE_MESSAGES ? messageCaptures : [],
+      captureMessages: ADMIN_CAPTURE_MESSAGES
     });
   }
 
@@ -717,6 +725,20 @@ function recordFlow(type, details = {}) {
     details
   });
   while (flowEvents.length > MAX_FLOW_EVENTS) flowEvents.shift();
+}
+
+function captureMessage({ packet, sealed, delivery }) {
+  if (!ADMIN_CAPTURE_MESSAGES) return;
+  messageCaptures.push({
+    id: sealed.id,
+    at: sealed.createdAt,
+    from: sealed.from,
+    to: sealed.to,
+    delivery,
+    encrypted: packet.encrypted,
+    debugPlaintext: typeof packet.debugPlaintext === "string" ? packet.debugPlaintext : null
+  });
+  while (messageCaptures.length > MAX_MESSAGE_CAPTURES) messageCaptures.shift();
 }
 
 function isOnline(userId) {

