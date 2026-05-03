@@ -13,6 +13,8 @@
 - 可选 `DATABASE_URL` 使用 Supabase/PostgreSQL 保存用户、公钥和好友关系
 - 可选 `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` 使用 Upstash Redis 保存短期离线密文队列
 - CSP、SRI、PWA 固定版本缓存和安全响应头
+- 受 `ADMIN_TOKEN` 保护的后台管理页 `/admin.html`
+- 后台可管理用户、公钥、好友关系、服务器存储 JSON，并查看不含消息内容的数据流事件图
 - 单轮次消息窗口：同一方连续消息会保留；对方发出下一条后，上一方消息消失；最后一条消息 15 分钟后消失
 - 通过好友 ID 或邀请代码添加好友
 - 双方互相添加且好友在线后，才允许发送消息
@@ -49,12 +51,31 @@ http://localhost:8787
 Render 环境变量：
 
 ```text
+ADMIN_TOKEN=choose-a-long-random-secret
 DATABASE_URL=postgresql://...
 UPSTASH_REDIS_REST_URL=https://...
 UPSTASH_REDIS_REST_TOKEN=...
 ```
 
 没有这些变量时，Demo 会继续使用本地 `data/store.json` 和内存离线队列。
+
+## 后台管理
+
+打开：
+
+```text
+https://你的域名/admin.html
+```
+
+输入 `ADMIN_TOKEN` 后可以查看和管理：
+
+- 用户、公钥、身份指纹、在线状态
+- 好友关系边
+- 当前离线队列数量
+- 服务器存储 JSON
+- 数据流可视化事件
+
+后台不会展示消息明文，也不会展示密文 body。数据流事件只记录类型、用户 ID、好友 ID、投递状态、队列状态等元数据。
 
 ## 安全说明
 

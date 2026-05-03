@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Secure Burn Admin</title>
+    <link rel="stylesheet" href="/admin.css" />
+  </head>
+  <body>
+    <main class="admin-shell">
+      <header class="admin-header">
+        <div>
+          <p class="eyebrow">Secure Burn</p>
+          <h1>后台管理</h1>
+        </div>
+        <form id="tokenForm" class="token-form">
+          <input id="adminToken" type="password" placeholder="ADMIN_TOKEN" autocomplete="current-password" />
+          <button>连接</button>
+        </form>
+      </header>
+
+      <section class="grid metrics">
+        <article><span>用户</span><strong id="userCount">0</strong></article>
+        <article><span>好友边</span><strong id="edgeCount">0</strong></article>
+        <article><span>在线</span><strong id="onlineCount">0</strong></article>
+        <article><span>离线队列</span><strong id="queueCount">0</strong></article>
+      </section>
+
+      <section class="layout">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>用户数据</h2>
+            <button id="refreshBtn" type="button">刷新</button>
+          </div>
+          <div id="usersTable" class="table"></div>
+        </article>
+
+        <article class="panel">
+          <h2>添加 / 删除好友关系</h2>
+          <form id="friendForm" class="stack">
+            <input id="edgeUser" placeholder="用户 ID" autocomplete="off" />
+            <input id="edgeFriend" placeholder="好友 ID" autocomplete="off" />
+            <div class="actions">
+              <button data-action="add" type="submit">添加边</button>
+              <button data-action="delete" class="danger" type="submit">删除边</button>
+            </div>
+          </form>
+          <div id="edgesTable" class="table compact"></div>
+        </article>
+
+        <article class="panel wide">
+          <h2>数据流可视化</h2>
+          <div id="flowGraph" class="flow-graph"></div>
+          <div id="flowEvents" class="flow-list"></div>
+        </article>
+
+        <article class="panel wide">
+          <div class="panel-head">
+            <h2>服务器存储 JSON</h2>
+            <button id="saveStoreBtn" type="button">保存替换</button>
+          </div>
+          <textarea id="storeEditor" spellcheck="false"></textarea>
+        </article>
+      </section>
+
+      <p id="adminStatus" class="status">请输入后台 token。</p>
+    </main>
+
+    <script src="/admin.js" type="module"></script>
+  </body>
+</html>

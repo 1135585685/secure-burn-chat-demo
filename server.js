@@ -11,12 +11,15 @@ const DATA_FILE = process.env.DATA_FILE || join(process.cwd(), "data", "store.js
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL || "";
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const clients = new Map();
 const offlineQueues = new Map();
 const OFFLINE_TTL_MS = 30 * 1000;
 const MAX_OFFLINE_QUEUE_PER_USER = 20;
+const MAX_FLOW_EVENTS = 300;
 let store = { users: {}, friends: {} };
 let dbPool = null;
+const flowEvents = [];
 const usePostgres = Boolean(DATABASE_URL);
 const useUpstash = Boolean(UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN);
 
@@ -72,6 +75,7 @@ wss.on("connection", (socket) => {
       }
       clients.set(userId, socket);
       send(socket, { type: "ready", userId, friends: getFriends(userId) });
+      recordFlow("client.connected", { userId, onlineUsers: clients.size });
       broadcastPresence(userId);
       await flushOffline(userId);
       return;
@@ -97,12 +101,14 @@ wss.on("connection", (socket) => {
         createdAt: Date.now()
       };
       const delivery = await deliverOrQueue(sealed);
+      recordFlow("message.accepted", { from, to, delivery, messageId: sealed.id });
       send(socket, { type: "sent", id: sealed.id, to, delivery });
     }
   });
 
   socket.on("close", () => {
     if (userId && clients.get(userId) === socket) clients.delete(userId);
+    if (userId) recordFlow("client.disconnected", { userId, onlineUsers: clients.size });
     if (userId) broadcastPresence(userId);
   });
 });
@@ -110,6 +116,10 @@ wss.on("connection", (socket) => {
 await initPersistence();
 
 async function handleApi(req, res, url) {
+  if (url.pathname.startsWith("/api/admin/")) {
+    return handleAdminApi(req, res, url);
+  }
+
   if (req.method === "POST" && url.pathname === "/api/register") {
     const body = await readJson(req);
     const userId = sanitizeId(body.userId);
@@ -167,6 +177,90 @@ async function handleApi(req, res, url) {
     await addFriend(userId, friendId);
     sendUser(friendId, { type: "friends", friends: getFriends(friendId) });
     return json(res, 200, { ok: true, friends: getFriends(userId) });
+  }
+
+  return json(res, 404, { ok: false, error: "Not found" });
+}
+
+async function handleAdminApi(req, res, url) {
+  if (!isAdminAuthorized(req)) {
+    return json(res, ADMIN_TOKEN ? 401 : 503, {
+      ok: false,
+      error: ADMIN_TOKEN ? "Admin token required" : "ADMIN_TOKEN is not configured"
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/admin/summary") {
+    return json(res, 200, {
+      ok: true,
+      persistence: {
+        users: usePostgres ? "postgres" : "file",
+        offlineQueue: useUpstash ? "upstash" : "memory"
+      },
+      users: adminUsers(),
+      friends: adminFriends(),
+      offlineQueues: await adminOfflineQueues(),
+      flowEvents
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/admin/export") {
+    return json(res, 200, {
+      ok: true,
+      store: sanitizedStore(),
+      offlineQueues: await adminOfflineQueues(),
+      flowEvents
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/admin/users") {
+    const body = await readJson(req);
+    const userId = sanitizeId(body.userId);
+    if (!userId || !isPublicKey(body.publicKey)) return json(res, 400, { ok: false, error: "Invalid user" });
+    await registerUser(userId, body.publicKey);
+    recordFlow("admin.user.upsert", { userId });
+    return json(res, 200, { ok: true, user: adminUsers().find((user) => user.userId === userId) });
+  }
+
+  if (req.method === "DELETE" && url.pathname.startsWith("/api/admin/users/")) {
+    const userId = sanitizeId(decodeURIComponent(url.pathname.split("/").pop() || ""));
+    if (!userId) return json(res, 400, { ok: false, error: "Invalid user id" });
+    await deleteUser(userId);
+    recordFlow("admin.user.delete", { userId });
+    return json(res, 200, { ok: true });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/admin/friends") {
+    const body = await readJson(req);
+    const userId = sanitizeId(body.userId);
+    const friendId = sanitizeId(body.friendId);
+    if (!userId || !friendId || userId === friendId || !store.users[userId] || !store.users[friendId]) {
+      return json(res, 400, { ok: false, error: "Invalid friend edge" });
+    }
+    await addFriend(userId, friendId);
+    sendUser(userId, { type: "friends", friends: getFriends(userId) });
+    recordFlow("admin.friend.add", { userId, friendId });
+    return json(res, 200, { ok: true, friends: adminFriends() });
+  }
+
+  if (req.method === "DELETE" && url.pathname === "/api/admin/friends") {
+    const body = await readJson(req);
+    const userId = sanitizeId(body.userId);
+    const friendId = sanitizeId(body.friendId);
+    if (!userId || !friendId) return json(res, 400, { ok: false, error: "Invalid friend edge" });
+    await removeFriend(userId, friendId);
+    sendUser(userId, { type: "friends", friends: getFriends(userId) });
+    recordFlow("admin.friend.delete", { userId, friendId });
+    return json(res, 200, { ok: true, friends: adminFriends() });
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/admin/store") {
+    const body = await readJson(req);
+    if (!isValidAdminStore(body.store)) return json(res, 400, { ok: false, error: "Invalid store" });
+    store = normalizeAdminStore(body.store);
+    await saveStore();
+    recordFlow("admin.store.replace", { users: Object.keys(store.users).length, edges: adminFriends().length });
+    return json(res, 200, { ok: true, store: sanitizedStore() });
   }
 
   return json(res, 404, { ok: false, error: "Not found" });
@@ -268,6 +362,7 @@ async function registerUser(userId, publicKey) {
   store.users[userId] = { publicKey, fingerprint, updatedAt: Date.now() };
   store.friends[userId] ||= [];
   await saveStore();
+  recordFlow(keyChanged ? "user.key.changed" : "user.registered", { userId, fingerprint });
   if (keyChanged) {
     broadcastKeyChange(userId);
   }
@@ -278,11 +373,13 @@ async function addFriend(userId, friendId) {
   if (!store.friends[userId].includes(friendId)) store.friends[userId].push(friendId);
   store.friends[userId].sort();
   await saveStore();
+  recordFlow("friend.added", { userId, friendId, mutual: areMutualFriends(userId, friendId) });
 }
 
 async function removeFriend(userId, friendId) {
   store.friends[userId] = (store.friends[userId] || []).filter((id) => id !== friendId);
   await saveStore();
+  recordFlow("friend.removed", { userId, friendId });
 }
 
 async function deleteUser(userId) {
@@ -299,6 +396,7 @@ async function deleteUser(userId) {
   }
   offlineQueues.delete(userId);
   await saveStore();
+  recordFlow("user.deleted", { userId, affected: affected.size });
   for (const id of affected) {
     sendUser(id, { type: "friends", friends: getFriends(id) });
   }
@@ -378,6 +476,7 @@ async function deliverOrQueue(packet) {
   const target = clients.get(packet.to);
   if (target?.readyState === target.OPEN) {
     send(target, packet);
+    recordFlow("message.delivered", { from: packet.from, to: packet.to, messageId: packet.id });
     return "delivered";
   }
 
@@ -386,6 +485,7 @@ async function deliverOrQueue(packet) {
     const current = Number(await redisCommand(["LLEN", key])) || 0;
     if (current >= MAX_OFFLINE_QUEUE_PER_USER) {
       sendUser(packet.from, { type: "expired", id: packet.id, to: packet.to, reason: "recipient queue full" });
+      recordFlow("message.rejected", { from: packet.from, to: packet.to, messageId: packet.id, reason: "queue full" });
       return "rejected";
     }
     await redisPipeline([
@@ -398,14 +498,17 @@ async function deliverOrQueue(packet) {
       if (queued.some((item) => item.id === packet.id)) {
         await saveRedisQueue(packet.to, queued.filter((item) => item.id !== packet.id));
         sendUser(packet.from, { type: "expired", id: packet.id, to: packet.to, reason: "offline ttl expired" });
+        recordFlow("message.expired", { from: packet.from, to: packet.to, messageId: packet.id, reason: "offline ttl expired" });
       }
     }, OFFLINE_TTL_MS).unref();
+    recordFlow("message.queued", { from: packet.from, to: packet.to, messageId: packet.id, backend: "upstash" });
     return "queued";
   }
 
   const queue = offlineQueues.get(packet.to) || [];
   if (queue.length >= MAX_OFFLINE_QUEUE_PER_USER) {
     sendUser(packet.from, { type: "expired", id: packet.id, to: packet.to, reason: "recipient queue full" });
+    recordFlow("message.rejected", { from: packet.from, to: packet.to, messageId: packet.id, reason: "queue full" });
     return "rejected";
   }
   queue.push(packet);
@@ -417,8 +520,10 @@ async function deliverOrQueue(packet) {
     else offlineQueues.delete(packet.to);
     if (existing.length !== filtered.length) {
       sendUser(packet.from, { type: "expired", id: packet.id, to: packet.to, reason: "offline ttl expired" });
+      recordFlow("message.expired", { from: packet.from, to: packet.to, messageId: packet.id, reason: "offline ttl expired" });
     }
   }, OFFLINE_TTL_MS).unref();
+  recordFlow("message.queued", { from: packet.from, to: packet.to, messageId: packet.id, backend: "memory" });
   return "queued";
 }
 
@@ -429,11 +534,13 @@ async function flushOffline(userId) {
     await redisCommand(["DEL", offlineQueueKey(userId)]);
     for (const packet of queue) {
       if (Date.now() - packet.createdAt < OFFLINE_TTL_MS) {
-        send(clients.get(userId), packet);
-        sendUser(packet.from, { type: "delivered", id: packet.id, to: userId });
-      } else {
-        sendUser(packet.from, { type: "expired", id: packet.id, to: userId, reason: "offline ttl expired" });
-      }
+      send(clients.get(userId), packet);
+      sendUser(packet.from, { type: "delivered", id: packet.id, to: userId });
+      recordFlow("message.delivered", { from: packet.from, to: userId, messageId: packet.id, fromQueue: true });
+    } else {
+      sendUser(packet.from, { type: "expired", id: packet.id, to: userId, reason: "offline ttl expired" });
+      recordFlow("message.expired", { from: packet.from, to: userId, messageId: packet.id, reason: "offline ttl expired" });
+    }
     }
     return;
   }
@@ -445,6 +552,7 @@ async function flushOffline(userId) {
     if (Date.now() - packet.createdAt < OFFLINE_TTL_MS) {
       send(clients.get(userId), packet);
       sendUser(packet.from, { type: "delivered", id: packet.id, to: userId });
+      recordFlow("message.delivered", { from: packet.from, to: userId, messageId: packet.id, fromQueue: true });
     }
   }
 }
@@ -505,6 +613,110 @@ async function saveRedisQueue(userId, queue) {
 
 function offlineQueueKey(userId) {
   return `secure-burn:offline:${userId}`;
+}
+
+function isAdminAuthorized(req) {
+  if (!ADMIN_TOKEN) return false;
+  const auth = req.headers.authorization || "";
+  const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  return bearer === ADMIN_TOKEN || req.headers["x-admin-token"] === ADMIN_TOKEN;
+}
+
+function adminUsers() {
+  return Object.entries(store.users)
+    .map(([userId, user]) => ({
+      userId,
+      fingerprint: user.fingerprint || fingerprintPublicKey(user.publicKey),
+      publicKey: user.publicKey,
+      updatedAt: user.updatedAt || null,
+      online: isOnline(userId),
+      friendCount: (store.friends[userId] || []).length
+    }))
+    .sort((a, b) => a.userId.localeCompare(b.userId));
+}
+
+function adminFriends() {
+  return Object.entries(store.friends)
+    .flatMap(([userId, friends]) => friends.map((friendId) => ({
+      userId,
+      friendId,
+      mutual: areMutualFriends(userId, friendId)
+    })))
+    .sort((a, b) => `${a.userId}:${a.friendId}`.localeCompare(`${b.userId}:${b.friendId}`));
+}
+
+async function adminOfflineQueues() {
+  const userIds = Object.keys(store.users).sort();
+  const summaries = [];
+  for (const userId of userIds) {
+    if (useUpstash) {
+      const count = Number(await redisCommand(["LLEN", offlineQueueKey(userId)])) || 0;
+      if (count) summaries.push({ userId, count, backend: "upstash", ttlSeconds: Math.ceil(OFFLINE_TTL_MS / 1000) });
+      continue;
+    }
+    const queue = offlineQueues.get(userId) || [];
+    if (!queue.length) continue;
+    summaries.push({
+      userId,
+      count: queue.length,
+      backend: "memory",
+      ttlSeconds: Math.ceil(OFFLINE_TTL_MS / 1000),
+      oldestAt: Math.min(...queue.map((packet) => packet.createdAt)),
+      newestAt: Math.max(...queue.map((packet) => packet.createdAt))
+    });
+  }
+  return summaries;
+}
+
+function sanitizedStore() {
+  return {
+    users: Object.fromEntries(adminUsers().map((user) => [user.userId, {
+      publicKey: user.publicKey,
+      fingerprint: user.fingerprint,
+      updatedAt: user.updatedAt
+    }])),
+    friends: Object.fromEntries(Object.entries(store.friends).map(([userId, friends]) => [userId, [...friends].sort()]))
+  };
+}
+
+function isValidAdminStore(candidate) {
+  if (!candidate || typeof candidate !== "object" || !candidate.users || !candidate.friends) return false;
+  for (const [userId, user] of Object.entries(candidate.users)) {
+    if (!sanitizeId(userId) || !isPublicKey(user.publicKey)) return false;
+  }
+  for (const [userId, friends] of Object.entries(candidate.friends)) {
+    if (!sanitizeId(userId) || !Array.isArray(friends)) return false;
+    for (const friendId of friends) {
+      if (!sanitizeId(friendId) || !candidate.users[friendId]) return false;
+    }
+  }
+  return true;
+}
+
+function normalizeAdminStore(candidate) {
+  const next = { users: {}, friends: {} };
+  for (const [userId, user] of Object.entries(candidate.users)) {
+    next.users[userId] = {
+      publicKey: user.publicKey,
+      fingerprint: user.fingerprint || fingerprintPublicKey(user.publicKey),
+      updatedAt: Number(user.updatedAt || Date.now())
+    };
+    next.friends[userId] = [];
+  }
+  for (const [userId, friends] of Object.entries(candidate.friends)) {
+    next.friends[userId] = [...new Set(friends)].sort();
+  }
+  return next;
+}
+
+function recordFlow(type, details = {}) {
+  flowEvents.push({
+    id: crypto.randomUUID(),
+    at: Date.now(),
+    type,
+    details
+  });
+  while (flowEvents.length > MAX_FLOW_EVENTS) flowEvents.shift();
 }
 
 function isOnline(userId) {
