@@ -1,0 +1,11 @@
+{
+  "name": "Secure Burn Chat",
+  "short_name": "Secure Burn",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f7f3ec",
+  "theme_color": "#12715b",
+  "description": "A lightweight end-to-end encrypted burn-after-reading chat demo.",
+  "icons": []
+}

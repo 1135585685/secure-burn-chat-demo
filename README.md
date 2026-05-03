@@ -10,6 +10,9 @@
 - 服务端不保存明文消息
 - 服务端持久保存用户公钥和好友关系
 - 离线密文只存内存，最多 20 条，30 秒后过期，并返回投递/过期回执
+- 可选 `DATABASE_URL` 使用 Supabase/PostgreSQL 保存用户、公钥和好友关系
+- 可选 `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` 使用 Upstash Redis 保存短期离线密文队列
+- CSP、SRI、PWA 固定版本缓存和安全响应头
 - 单轮次消息窗口：同一方连续消息会保留；对方发出下一条后，上一方消息消失；最后一条消息 15 分钟后消失
 - 通过好友 ID 或邀请代码添加好友
 - 双方互相添加且好友在线后，才允许发送消息
@@ -41,6 +44,18 @@ http://localhost:8787
 
 好友关系会写入本地服务端的 `data/store.json`，这个文件不会提交到 Git。部署到 Render 免费实例时，实例重启或重新部署可能丢失本地文件；生产版本应改用 PostgreSQL、Redis 或 Render Disk 保存用户公钥和好友关系。
 
+## 云端持久化
+
+Render 环境变量：
+
+```text
+DATABASE_URL=postgresql://...
+UPSTASH_REDIS_REST_URL=https://...
+UPSTASH_REDIS_REST_TOKEN=...
+```
+
+没有这些变量时，Demo 会继续使用本地 `data/store.json` 和内存离线队列。
+
 ## 安全说明
 
 这是原型 Demo，不是生产级安全产品。当前版本已经把身份私钥迁移到 IndexedDB 中的不可导出 `CryptoKey`，但网页端仍然无法防止恶意浏览器扩展、被篡改的前端代码、截图、调试器和被攻破设备。
@@ -48,7 +63,5 @@ http://localhost:8787
 生产版本建议升级：
 
 - 原生 App 使用 iOS Keychain / Android Keystore
-- 接入官方 Signal `libsignal`，替换当前 Demo 的简单 ECDH 会话密钥
-- 增加身份密钥指纹校验和密钥变更提醒
-- 给离线密文增加更严格的 TTL、队列限制和交付回执
+- 接入官方 Signal `libsignal`，替换当前 Demo 的简单 ECDH 会话密钥。官方 libsignal 暴露 Java、Swift、TypeScript API，但完整浏览器端集成需要打包和协议存储层，不应手写冒充。
 - 做完整安全审计

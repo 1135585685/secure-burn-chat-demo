@@ -46,6 +46,7 @@ boot();
 
 async function boot() {
   showEmpty("先输入你的 ID 进入，再添加好友。");
+  registerServiceWorker();
   const lastUserId = localStorage.getItem("secureBurnLastUserId");
   if (lastUserId) els.userId.value = lastUserId;
   renderFriends();
@@ -694,4 +695,11 @@ function escapeHtml(value) {
     '"': "&quot;",
     "'": "&#039;"
   })[char]);
+}
+
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.register("/sw.js").catch(() => {
+    toast("PWA 固定版本缓存注册失败。");
+  });
 }

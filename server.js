@@ -2,16 +2,23 @@ import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, join, normalize } from "node:path";
+import pg from "pg";
 import { WebSocketServer } from "ws";
 
 const PORT = Number(process.env.PORT || 8787);
 const PUBLIC_DIR = join(process.cwd(), "public");
 const DATA_FILE = process.env.DATA_FILE || join(process.cwd(), "data", "store.json");
+const DATABASE_URL = process.env.DATABASE_URL || "";
+const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL || "";
+const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
 const clients = new Map();
 const offlineQueues = new Map();
 const OFFLINE_TTL_MS = 30 * 1000;
 const MAX_OFFLINE_QUEUE_PER_USER = 20;
 let store = { users: {}, friends: {} };
+let dbPool = null;
+const usePostgres = Boolean(DATABASE_URL);
+const useUpstash = Boolean(UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN);
 
 const contentTypes = {
   ".html": "text/html; charset=utf-8",
@@ -34,7 +41,8 @@ const server = createServer(async (req, res) => {
     const body = await readFile(filePath);
     res.writeHead(200, {
       "content-type": contentTypes[extname(filePath)] || "application/octet-stream",
-      "cache-control": "no-store"
+      "cache-control": "no-store",
+      ...securityHeaders(filePath)
     });
     res.end(body);
   } catch {
@@ -65,7 +73,7 @@ wss.on("connection", (socket) => {
       clients.set(userId, socket);
       send(socket, { type: "ready", userId, friends: getFriends(userId) });
       broadcastPresence(userId);
-      flushOffline(userId);
+      await flushOffline(userId);
       return;
     }
 
@@ -88,7 +96,7 @@ wss.on("connection", (socket) => {
         encrypted: packet.encrypted,
         createdAt: Date.now()
       };
-      const delivery = deliverOrQueue(sealed);
+      const delivery = await deliverOrQueue(sealed);
       send(socket, { type: "sent", id: sealed.id, to, delivery });
     }
   });
@@ -99,7 +107,7 @@ wss.on("connection", (socket) => {
   });
 });
 
-await loadStore();
+await initPersistence();
 
 async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/register") {
@@ -164,7 +172,50 @@ async function handleApi(req, res, url) {
   return json(res, 404, { ok: false, error: "Not found" });
 }
 
+async function initPersistence() {
+  if (usePostgres) {
+    dbPool = new pg.Pool({
+      connectionString: DATABASE_URL,
+      ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false }
+    });
+    await dbPool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY,
+        public_key JSONB NOT NULL,
+        fingerprint TEXT NOT NULL,
+        updated_at BIGINT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS friends (
+        user_id TEXT NOT NULL,
+        friend_id TEXT NOT NULL,
+        PRIMARY KEY (user_id, friend_id)
+      );
+    `);
+  }
+  await loadStore();
+}
+
 async function loadStore() {
+  if (usePostgres) {
+    const users = await dbPool.query("SELECT user_id, public_key, fingerprint, updated_at FROM users");
+    const friends = await dbPool.query("SELECT user_id, friend_id FROM friends");
+    store = { users: {}, friends: {} };
+    for (const row of users.rows) {
+      store.users[row.user_id] = {
+        publicKey: row.public_key,
+        fingerprint: row.fingerprint,
+        updatedAt: Number(row.updated_at)
+      };
+      store.friends[row.user_id] ||= [];
+    }
+    for (const row of friends.rows) {
+      store.friends[row.user_id] ||= [];
+      store.friends[row.user_id].push(row.friend_id);
+    }
+    for (const friendList of Object.values(store.friends)) friendList.sort();
+    return;
+  }
+
   try {
     store = JSON.parse(await readFile(DATA_FILE, "utf8"));
     store.users ||= {};
@@ -176,6 +227,36 @@ async function loadStore() {
 }
 
 async function saveStore() {
+  if (usePostgres) {
+    const client = await dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM friends");
+      await client.query("DELETE FROM users");
+      for (const [userId, user] of Object.entries(store.users)) {
+        await client.query(
+          "INSERT INTO users (user_id, public_key, fingerprint, updated_at) VALUES ($1, $2, $3, $4)",
+          [userId, user.publicKey, user.fingerprint || fingerprintPublicKey(user.publicKey), user.updatedAt || Date.now()]
+        );
+      }
+      for (const [userId, friends] of Object.entries(store.friends)) {
+        for (const friendId of friends) {
+          await client.query(
+            "INSERT INTO friends (user_id, friend_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            [userId, friendId]
+          );
+        }
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
   await mkdir(dirname(DATA_FILE), { recursive: true });
   await writeFile(DATA_FILE, JSON.stringify(store, null, 2));
 }
@@ -256,16 +337,70 @@ function readJson(req) {
 function json(res, status, body) {
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
-    "cache-control": "no-store"
+    "cache-control": "no-store",
+    ...securityHeaders()
   });
   res.end(JSON.stringify(body));
 }
 
-function deliverOrQueue(packet) {
+function securityHeaders(filePath = "") {
+  const connect = [
+    "'self'",
+    "ws:",
+    "wss:",
+    UPSTASH_REDIS_REST_URL ? new URL(UPSTASH_REDIS_REST_URL).origin : ""
+  ].filter(Boolean).join(" ");
+
+  return {
+    "content-security-policy": [
+      "default-src 'self'",
+      "base-uri 'none'",
+      "object-src 'none'",
+      "frame-ancestors 'none'",
+      "form-action 'self'",
+      "script-src 'self'",
+      "style-src 'self'",
+      `connect-src ${connect}`,
+      "img-src 'self' data:",
+      "manifest-src 'self'",
+      "worker-src 'self'"
+    ].join("; "),
+    "cross-origin-opener-policy": "same-origin",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+    ...(extname(filePath) === ".html" ? { "clear-site-data": '"cache"' } : {})
+  };
+}
+
+async function deliverOrQueue(packet) {
   const target = clients.get(packet.to);
   if (target?.readyState === target.OPEN) {
     send(target, packet);
     return "delivered";
+  }
+
+  if (useUpstash) {
+    const key = offlineQueueKey(packet.to);
+    const current = Number(await redisCommand(["LLEN", key])) || 0;
+    if (current >= MAX_OFFLINE_QUEUE_PER_USER) {
+      sendUser(packet.from, { type: "expired", id: packet.id, to: packet.to, reason: "recipient queue full" });
+      return "rejected";
+    }
+    await redisPipeline([
+      ["RPUSH", key, JSON.stringify(packet)],
+      ["EXPIRE", key, String(Math.ceil(OFFLINE_TTL_MS / 1000))],
+      ["LTRIM", key, String(-MAX_OFFLINE_QUEUE_PER_USER), "-1"]
+    ]);
+    setTimeout(async () => {
+      const queued = await loadRedisQueue(packet.to);
+      if (queued.some((item) => item.id === packet.id)) {
+        await saveRedisQueue(packet.to, queued.filter((item) => item.id !== packet.id));
+        sendUser(packet.from, { type: "expired", id: packet.id, to: packet.to, reason: "offline ttl expired" });
+      }
+    }, OFFLINE_TTL_MS).unref();
+    return "queued";
   }
 
   const queue = offlineQueues.get(packet.to) || [];
@@ -287,7 +422,22 @@ function deliverOrQueue(packet) {
   return "queued";
 }
 
-function flushOffline(userId) {
+async function flushOffline(userId) {
+  if (useUpstash) {
+    const queue = await loadRedisQueue(userId);
+    if (!queue.length) return;
+    await redisCommand(["DEL", offlineQueueKey(userId)]);
+    for (const packet of queue) {
+      if (Date.now() - packet.createdAt < OFFLINE_TTL_MS) {
+        send(clients.get(userId), packet);
+        sendUser(packet.from, { type: "delivered", id: packet.id, to: userId });
+      } else {
+        sendUser(packet.from, { type: "expired", id: packet.id, to: userId, reason: "offline ttl expired" });
+      }
+    }
+    return;
+  }
+
   const queue = offlineQueues.get(userId);
   if (!queue?.length) return;
   offlineQueues.delete(userId);
@@ -305,6 +455,56 @@ function send(socket, packet) {
 
 function sendUser(userId, packet) {
   send(clients.get(userId), packet);
+}
+
+async function redisCommand(command) {
+  const response = await fetch(`${UPSTASH_REDIS_REST_URL}/pipeline`, {
+    method: "POST",
+    headers: {
+      "authorization": `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify([command])
+  });
+  const body = await response.json();
+  if (!response.ok || body[0]?.error) throw new Error(body[0]?.error || "Redis command failed");
+  return body[0]?.result;
+}
+
+async function redisPipeline(commands) {
+  const response = await fetch(`${UPSTASH_REDIS_REST_URL}/pipeline`, {
+    method: "POST",
+    headers: {
+      "authorization": `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(commands)
+  });
+  const body = await response.json();
+  if (!response.ok || body.some((item) => item.error)) throw new Error("Redis pipeline failed");
+  return body.map((item) => item.result);
+}
+
+async function loadRedisQueue(userId) {
+  const entries = await redisCommand(["LRANGE", offlineQueueKey(userId), "0", "-1"]);
+  return (entries || []).map((entry) => JSON.parse(entry));
+}
+
+async function saveRedisQueue(userId, queue) {
+  const key = offlineQueueKey(userId);
+  if (!queue.length) {
+    await redisCommand(["DEL", key]);
+    return;
+  }
+  await redisPipeline([
+    ["DEL", key],
+    ["RPUSH", key, ...queue.map((packet) => JSON.stringify(packet))],
+    ["EXPIRE", key, String(Math.ceil(OFFLINE_TTL_MS / 1000))]
+  ]);
+}
+
+function offlineQueueKey(userId) {
+  return `secure-burn:offline:${userId}`;
 }
 
 function isOnline(userId) {
