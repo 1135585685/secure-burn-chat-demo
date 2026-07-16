@@ -19,6 +19,15 @@ class SecureBurnApi(private val baseUrl: String) {
         return post("/api/friends", JSONObject().put("userId", userId).put("friend", friend))
     }
 
+    fun getFriends(userId: String): JSONObject {
+        val request = Request.Builder().url("$baseUrl/api/friends/$userId").get().build()
+        client.newCall(request).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) error(body)
+            return JSONObject(body)
+        }
+    }
+
     fun getUser(userId: String): JSONObject {
         val request = Request.Builder().url("$baseUrl/api/users/$userId").get().build()
         client.newCall(request).execute().use { response ->
@@ -26,6 +35,14 @@ class SecureBurnApi(private val baseUrl: String) {
             if (!response.isSuccessful) error(body)
             return JSONObject(body)
         }
+    }
+
+    fun deleteFriend(userId: String, friendId: String): JSONObject {
+        return delete("/api/friends", JSONObject().put("userId", userId).put("friendId", friendId))
+    }
+
+    fun deleteUser(userId: String): JSONObject {
+        return delete("/api/users", JSONObject().put("userId", userId))
     }
 
     private fun post(path: String, body: JSONObject): JSONObject {
@@ -39,5 +56,16 @@ class SecureBurnApi(private val baseUrl: String) {
             return JSONObject(text)
         }
     }
-}
 
+    private fun delete(path: String, body: JSONObject): JSONObject {
+        val request = Request.Builder()
+            .url("$baseUrl$path")
+            .delete(body.toString().toRequestBody(jsonType))
+            .build()
+        client.newCall(request).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) error(text)
+            return JSONObject(text)
+        }
+    }
+}

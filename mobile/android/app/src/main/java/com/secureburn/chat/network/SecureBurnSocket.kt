@@ -25,6 +25,14 @@ class SecureBurnSocket(
             override fun onMessage(webSocket: WebSocket, text: String) {
                 onEvent(JSONObject(text))
             }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                onEvent(JSONObject().put("type", "closed").put("reason", reason))
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                onEvent(JSONObject().put("type", "socketError").put("message", t.message ?: "WebSocket error"))
+            }
         })
     }
 
@@ -36,4 +44,3 @@ class SecureBurnSocket(
         socket?.close(1000, "closed")
     }
 }
-

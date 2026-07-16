@@ -37,6 +37,16 @@ const contentTypes = {
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host}`);
+    if (url.pathname === "/healthz") {
+      return json(res, 200, {
+        ok: true,
+        service: "secure-burn-chat-demo",
+        persistence: usePostgres ? "postgres" : "file",
+        offlineQueue: useUpstash ? "upstash" : "memory",
+        onlineUsers: clients.size
+      });
+    }
+
     if (url.pathname.startsWith("/api/")) {
       return handleApi(req, res, url);
     }

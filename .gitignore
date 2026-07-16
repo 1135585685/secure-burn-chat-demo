@@ -3,3 +3,6 @@ node_modules/
 data/
 .DS_Store
 *.log
+mobile/android/.gradle/
+mobile/android/app/build/
+mobile/android/local.properties
