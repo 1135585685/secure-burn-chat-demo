@@ -18,14 +18,16 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -35,8 +37,11 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -105,6 +110,7 @@ class MainActivity : ComponentActivity() {
         var currentMessage by remember { mutableStateOf<VisibleMessage?>(null) }
         var countdownNow by remember { mutableStateOf(System.currentTimeMillis()) }
         var wipeConfirm by remember { mutableStateOf(false) }
+        var addFriendDialog by remember { mutableStateOf(false) }
         var selectedTab by remember { mutableStateOf(AppTab.CHATS) }
         val friends = remember { mutableStateListOf<Friend>() }
         val keyChangedFriends = remember { mutableStateListOf<String>() }
@@ -134,9 +140,17 @@ class MainActivity : ComponentActivity() {
                 background = Color(0xFFF1F5F9)
             )
         ) {
-            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Scaffold(
+                containerColor = MaterialTheme.colorScheme.background,
+                bottomBar = {
+                    BottomNavigationBar(selectedTab = selectedTab, onSelect = { selectedTab = it })
+                }
+            ) { innerPadding ->
                 LazyColumn(
-                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     item {
@@ -261,9 +275,8 @@ class MainActivity : ComponentActivity() {
                             onWipe = { wipeConfirm = true }
                         )
                     }
-
                     item {
-                        AppTabs(selectedTab = selectedTab, onSelect = { selectedTab = it })
+                        CompactStatusBanner(status = status, tone = statusTone)
                     }
 
                     if (selectedTab == AppTab.CHATS) {
@@ -345,41 +358,14 @@ class MainActivity : ComponentActivity() {
 
                     if (selectedTab == AppTab.CONTACTS) {
                         item {
-                            FriendManagerCard(
-                                friendId = friendId,
-                                friendInvite = friendInvite,
-                                onFriendIdChange = { friendId = it },
-                                onFriendInviteChange = { friendInvite = it },
-                                onAddFriend = {
-                                    if (activeUserId.isBlank()) {
-                                        status = "请先登入。"
-                                        statusTone = UiTone.WARNING
-                                        return@FriendManagerCard
-                                    }
-                                    scope.launch(Dispatchers.IO) {
-                                        try {
-                                            val friend = resolveFriend(friendId.trim(), friendInvite.trim())
-                                            if (friend.userId == activeUserId) error("不能添加自己")
-                                            val result = api.addFriend(activeUserId, friend.userId, friend.publicKey)
-                                            val incoming = parseFriends(result.optJSONArray("friends"))
-                                            runOnUiThread {
-                                                replaceFriends(friends, incoming, keyChangedFriends)
-                                                saveFriends(activeUserId, friends)
-                                                activeFriendId = friend.userId
-                                                selectedTab = AppTab.CHATS
-                                                friendId = ""
-                                                friendInvite = ""
-                                                status = "已添加好友 ${friend.userId}，等待双向确认后可通信。"
-                                                statusTone = UiTone.SUCCESS
-                                            }
-                                        } catch (error: Throwable) {
-                                            runOnUiThread {
-                                                status = "添加失败：请确认好友 ID 已进入过系统，或粘贴完整邀请代码。"
-                                                statusTone = UiTone.WARNING
-                                            }
-                                        }
-                                    }
-                                }
+                            ContactEntryCard(
+                                inviteCode = inviteCode,
+                                onCopyInvite = {
+                                    if (inviteCode.isNotBlank()) copyText("Secure Burn 邀请码", inviteCode)
+                                    status = "邀请代码已复制。"
+                                    statusTone = UiTone.SUCCESS
+                                },
+                                onAdd = { addFriendDialog = true }
                             )
                         }
                         item {
@@ -481,6 +467,47 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                if (addFriendDialog) {
+                    AddFriendDialog(
+                        friendId = friendId,
+                        friendInvite = friendInvite,
+                        onFriendIdChange = { friendId = it },
+                        onFriendInviteChange = { friendInvite = it },
+                        onDismiss = { addFriendDialog = false },
+                        onAddFriend = {
+                            if (activeUserId.isBlank()) {
+                                status = "请先登入。"
+                                statusTone = UiTone.WARNING
+                                return@AddFriendDialog
+                            }
+                            scope.launch(Dispatchers.IO) {
+                                try {
+                                    val friend = resolveFriend(friendId.trim(), friendInvite.trim())
+                                    if (friend.userId == activeUserId) error("不能添加自己")
+                                    val result = api.addFriend(activeUserId, friend.userId, friend.publicKey)
+                                    val incoming = parseFriends(result.optJSONArray("friends"))
+                                    runOnUiThread {
+                                        replaceFriends(friends, incoming, keyChangedFriends)
+                                        saveFriends(activeUserId, friends)
+                                        activeFriendId = friend.userId
+                                        selectedTab = AppTab.CHATS
+                                        addFriendDialog = false
+                                        friendId = ""
+                                        friendInvite = ""
+                                        status = "已添加好友 ${friend.userId}，等待双向确认后可通信。"
+                                        statusTone = UiTone.SUCCESS
+                                    }
+                                } catch (error: Throwable) {
+                                    runOnUiThread {
+                                        status = "添加失败：请确认好友 ID 已进入过系统，或粘贴完整邀请代码。"
+                                        statusTone = UiTone.WARNING
+                                    }
+                                }
+                            }
+                        }
+                    )
+                }
+
                 if (wipeConfirm) {
                     AlertDialog(
                         onDismissRequest = { wipeConfirm = false },
@@ -544,12 +571,25 @@ class MainActivity : ComponentActivity() {
         onWipe: () -> Unit
     ) {
         SectionCard {
+            if (activeUserId.isNotBlank()) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Secure Burn", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text("$activeUserId · ${if (status.contains("已连接")) "已连接" else "安全通信"}", color = Color(0xFF64748B), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    StatusPill(if (status.contains("已连接")) "端到端加密" else "已登入", true)
+                }
+                Spacer(Modifier.height(8.dp))
+                Text("身份指纹：$fingerprint", color = Color(0xFF64748B), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                return@SectionCard
+            }
+
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column {
                     Text("Secure Burn", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Text("Android 端到端加密客户端", color = Color(0xFF64748B))
+                    Text("安全通信，从身份开始", color = Color(0xFF64748B))
                 }
-                StatusPill(if (activeUserId.isBlank()) "未登入" else "已登入", activeUserId.isNotBlank())
+                StatusPill("未登入", false)
             }
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
@@ -560,44 +600,99 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth()
             )
             Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onLogin, modifier = Modifier.weight(1f)) { Text("登入") }
-                OutlinedButton(onClick = onLogout, enabled = activeUserId.isNotBlank()) { Text("退出") }
-            }
+            Button(onClick = onLogin, modifier = Modifier.fillMaxWidth()) { Text("登入") }
             Spacer(Modifier.height(10.dp))
             Text(status, color = Color(0xFF334155), style = MaterialTheme.typography.bodyMedium)
-            Text("身份指纹：$fingerprint", color = Color(0xFF64748B), style = MaterialTheme.typography.bodySmall)
-            if (inviteCode.isNotBlank()) {
-                Spacer(Modifier.height(10.dp))
-                Text("邀请代码", fontWeight = FontWeight.SemiBold)
-                Text(inviteCode, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Color(0xFF475569))
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onCopyInvite, modifier = Modifier.weight(1f)) { Text("复制邀请代码") }
-                    OutlinedButton(
-                        onClick = onWipe,
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB91C1C))
-                    ) { Text("删除所有记录") }
-                }
+        }
+    }
+
+    @Composable
+    private fun BottomNavigationBar(selectedTab: AppTab, onSelect: (AppTab) -> Unit) {
+        NavigationBar(
+            containerColor = Color.White,
+            modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)
+        ) {
+            AppTab.entries.forEach { tab ->
+                NavigationBarItem(
+                    selected = tab == selectedTab,
+                    onClick = { onSelect(tab) },
+                    icon = { StatusDot(if (tab == selectedTab) UiTone.SUCCESS else UiTone.INFO) },
+                    label = { Text(tab.label) }
+                )
             }
         }
     }
 
     @Composable
-    private fun AppTabs(selectedTab: AppTab, onSelect: (AppTab) -> Unit) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AppTab.entries.forEach { tab ->
-                val selected = tab == selectedTab
-                if (selected) {
-                    Button(onClick = { onSelect(tab) }, modifier = Modifier.weight(1f)) {
-                        Text(tab.label)
-                    }
-                } else {
-                    OutlinedButton(onClick = { onSelect(tab) }, modifier = Modifier.weight(1f)) {
-                        Text(tab.label)
-                    }
+    private fun ContactEntryCard(inviteCode: String, onCopyInvite: () -> Unit, onAdd: () -> Unit) {
+        SectionCard {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("联系人", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("通过邀请代码建立信任，或添加已注册 ID。", color = Color(0xFF64748B), style = MaterialTheme.typography.bodySmall)
                 }
+                Button(onClick = onAdd) { Text("添加") }
             }
+            if (inviteCode.isNotBlank()) {
+                Spacer(Modifier.height(12.dp))
+                Text("我的邀请代码", fontWeight = FontWeight.SemiBold)
+                Text(inviteCode, color = Color(0xFF64748B), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = onCopyInvite, modifier = Modifier.fillMaxWidth()) { Text("复制邀请代码") }
+            }
+        }
+    }
+
+    @Composable
+    private fun AddFriendDialog(
+        friendId: String,
+        friendInvite: String,
+        onFriendIdChange: (String) -> Unit,
+        onFriendInviteChange: (String) -> Unit,
+        onDismiss: () -> Unit,
+        onAddFriend: () -> Unit
+    ) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("添加联系人") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = friendId,
+                        onValueChange = onFriendIdChange,
+                        label = { Text("好友 ID") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = friendInvite,
+                        onValueChange = onFriendInviteChange,
+                        label = { Text("或粘贴完整邀请代码") },
+                        minLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text("建议优先使用邀请代码，因为它包含对方公钥和身份指纹。", color = Color(0xFF64748B), style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { TextButton(onClick = onAddFriend) { Text("添加") } },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+        )
+    }
+
+    @Composable
+    private fun CompactStatusBanner(status: String, tone: UiTone) {
+        val colors = toneColors(tone)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(colors.background, RoundedCornerShape(14.dp))
+                .border(1.dp, colors.border, RoundedCornerShape(14.dp))
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            StatusDot(tone)
+            Spacer(Modifier.width(10.dp))
+            Text(status, color = colors.foreground, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
     }
 
@@ -707,17 +802,33 @@ class MainActivity : ComponentActivity() {
                 Text("暂无好友。用 ID 或邀请代码添加联系人。", color = Color(0xFF64748B))
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    friends.forEach { friend ->
-                        FriendRow(
-                            friend = friend,
-                            selected = friend.userId == activeFriendId,
-                            keyChanged = friend.userId in keyChangedFriends,
-                            onSelect = { onSelect(friend.userId) },
-                            onDelete = { onDelete(friend.userId) }
-                        )
-                    }
+                    FriendGroup("密钥异常", friends.filter { it.userId in keyChangedFriends }, activeFriendId, keyChangedFriends, onSelect, onDelete)
+                    FriendGroup("待确认", friends.filter { it.userId !in keyChangedFriends && !it.confirmed }, activeFriendId, keyChangedFriends, onSelect, onDelete)
+                    FriendGroup("已确认", friends.filter { it.userId !in keyChangedFriends && it.confirmed }, activeFriendId, keyChangedFriends, onSelect, onDelete)
                 }
             }
+        }
+    }
+
+    @Composable
+    private fun FriendGroup(
+        title: String,
+        groupFriends: List<Friend>,
+        activeFriendId: String,
+        keyChangedFriends: List<String>,
+        onSelect: (String) -> Unit,
+        onDelete: (String) -> Unit
+    ) {
+        if (groupFriends.isEmpty()) return
+        Text(title, color = Color(0xFF64748B), fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+        groupFriends.forEach { friend ->
+            FriendRow(
+                friend = friend,
+                selected = friend.userId == activeFriendId,
+                keyChanged = friend.userId in keyChangedFriends,
+                onSelect = { onSelect(friend.userId) },
+                onDelete = { onDelete(friend.userId) }
+            )
         }
     }
 
@@ -735,6 +846,12 @@ class MainActivity : ComponentActivity() {
         SectionCard {
             Text("安全中心", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
+            SecurityDashboard(
+                activeUserId = activeUserId,
+                friends = friends,
+                keyChangedFriends = keyChangedFriends
+            )
+            Spacer(Modifier.height(12.dp))
             StatusRow("我的 ID", activeUserId.ifBlank { "未登入" }, if (activeUserId.isBlank()) UiTone.WARNING else UiTone.SUCCESS)
             StatusRow("身份指纹", fingerprint, if (activeUserId.isBlank()) UiTone.WARNING else UiTone.SUCCESS)
             StatusRow("公钥状态", if (activeUserId.isBlank()) "未注册" else "已注册到服务器，私钥保留在本机", if (activeUserId.isBlank()) UiTone.WARNING else UiTone.SUCCESS)
@@ -776,6 +893,36 @@ class MainActivity : ComponentActivity() {
             OutlinedButton(onClick = onWipe, colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB91C1C)), modifier = Modifier.fillMaxWidth()) {
                 Text("删除所有记录")
             }
+        }
+    }
+
+    @Composable
+    private fun SecurityDashboard(activeUserId: String, friends: List<Friend>, keyChangedFriends: List<String>) {
+        val verifiedCount = friends.count { it.confirmed && it.userId !in keyChangedFriends }
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                MetricTile("身份密钥", if (activeUserId.isBlank()) "未加载" else "正常", if (activeUserId.isBlank()) UiTone.WARNING else UiTone.SUCCESS, Modifier.weight(1f))
+                MetricTile("好友验证", "$verifiedCount/${friends.size}", if (verifiedCount == friends.size && friends.isNotEmpty()) UiTone.SUCCESS else UiTone.WARNING, Modifier.weight(1f))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                MetricTile("密钥异常", keyChangedFriends.size.toString(), if (keyChangedFriends.isEmpty()) UiTone.SUCCESS else UiTone.DANGER, Modifier.weight(1f))
+                MetricTile("本机数据", "仅设备", UiTone.SUCCESS, Modifier.weight(1f))
+            }
+            MetricTile("服务器存储", "不保存消息明文；仅保存用户公钥和好友关系", UiTone.SUCCESS, Modifier.fillMaxWidth())
+        }
+    }
+
+    @Composable
+    private fun MetricTile(label: String, value: String, tone: UiTone, modifier: Modifier = Modifier) {
+        val colors = toneColors(tone)
+        Column(
+            modifier
+                .background(colors.background, RoundedCornerShape(12.dp))
+                .border(1.dp, colors.border, RoundedCornerShape(12.dp))
+                .padding(10.dp)
+        ) {
+            Text(label, color = Color(0xFF64748B), style = MaterialTheme.typography.bodySmall)
+            Text(value, color = colors.foreground, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
     }
 
