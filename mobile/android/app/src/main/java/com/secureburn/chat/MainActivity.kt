@@ -117,7 +117,7 @@ class MainActivity : ComponentActivity() {
         val scope = rememberCoroutineScope()
         val activeFriend = friends.firstOrNull { it.userId == activeFriendId }
         val activeKeyChanged = activeFriendId in keyChangedFriends
-        val canSend = connected && activeUserId.isNotBlank() && activeFriend?.confirmed == true && activeFriend.online && !activeKeyChanged
+        val canSend = connected && activeUserId.isNotBlank() && activeFriend?.confirmed == true && !activeKeyChanged
 
         LaunchedEffect(currentMessage?.id) {
             while (currentMessage != null) {
@@ -323,7 +323,6 @@ class MainActivity : ComponentActivity() {
                                             status = when {
                                                 activeKeyChanged -> "好友身份密钥已变更，重新验证指纹前已暂停发送。"
                                                 !connected -> "连接未就绪，消息没有发送。"
-                                                friend.confirmed -> "好友离线，暂不可发送。"
                                                 else -> "需要双方互相添加好友后才可发送。"
                                             }
                                             statusTone = UiTone.WARNING
@@ -1289,13 +1288,13 @@ class MainActivity : ComponentActivity() {
 
     private fun friendState(friend: Friend): String {
         if (!friend.confirmed) return "待对方确认"
-        return if (friend.online) "在线，可发送" else "离线"
+        return if (friend.online) "在线，可发送" else "离线，可排队"
     }
 
     private fun conversationStatus(friend: Friend, keyChanged: Boolean): String {
         if (keyChanged) return "身份密钥已变更 · 需要重新验证"
         if (!friend.confirmed) return "待对方确认 · 暂不可发送"
-        if (!friend.online) return "已双向确认 · 离线"
+        if (!friend.online) return "已双向确认 · 离线排队"
         return "双向确认 · 在线"
     }
 
@@ -1309,10 +1308,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun chatSubtitle(friend: Friend?, keyChanged: Boolean = false): String {
-        if (friend == null) return "双方互相添加且在线后才可发送。"
+        if (friend == null) return "双方互相添加后可发送。好友离线时进入短期密文队列。"
         if (keyChanged) return "身份密钥已变更，重新验证前已暂停发送。"
         if (!friend.confirmed) return "等待对方也添加你，完成双向确认。"
-        if (!friend.online) return "好友离线，暂不可发送。"
+        if (!friend.online) return "好友离线，发送后进入短期密文队列。"
         return "双向确认且在线，可发送端到端加密消息。"
     }
 
@@ -1320,7 +1319,7 @@ class MainActivity : ComponentActivity() {
         if (friend == null) return "未选择联系人"
         if (keyChanged) return "密钥已变更，发送已暂停"
         if (!friend.confirmed) return "未双向确认，暂不可发送"
-        if (!friend.online) return "已确认但离线"
+        if (!friend.online) return "已确认，离线排队"
         return "已确认且在线"
     }
 

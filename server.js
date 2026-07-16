@@ -112,9 +112,6 @@ wss.on("connection", (socket) => {
       if (!areMutualFriends(from, to)) {
         return send(socket, { type: "error", message: "消息未发送：需要双方互相添加好友。" });
       }
-      if (!isOnline(to)) {
-        return send(socket, { type: "error", message: "消息未发送：好友当前不在线。" });
-      }
 
       const sealed = {
         type: "message",

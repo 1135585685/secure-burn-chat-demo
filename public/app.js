@@ -561,15 +561,15 @@ async function wipeLocalUser(userId) {
 
 function syncComposerState() {
   const friend = state.friends.get(state.activeFriendId);
-  const canSend = Boolean(state.userId && friend?.confirmed && friend?.online && state.connected);
+  const canSend = Boolean(state.userId && friend?.confirmed && state.connected);
   els.messageInput.disabled = !canSend;
   els.sendBtn.disabled = !canSend;
   if (!state.activeFriendId) {
-    els.chatSubtitle.textContent = "双方互相添加且在线后才可发送。";
+    els.chatSubtitle.textContent = "双方互相添加后可发送。好友离线时进入短期密文队列。";
   } else if (!friend?.confirmed) {
     els.chatSubtitle.textContent = "等待对方也添加你，完成双向确认。";
   } else if (!friend.online) {
-    els.chatSubtitle.textContent = "好友离线，暂不可发送。";
+    els.chatSubtitle.textContent = "好友离线，发送后进入短期密文队列。";
   } else {
     els.chatSubtitle.textContent = "双向确认且在线，可发送端到端加密消息。";
   }
@@ -578,7 +578,7 @@ function syncComposerState() {
 function friendLabel(friend) {
   if (friend.keyChanged) return "密钥已变更，请核对";
   if (!friend.confirmed) return "待对方确认";
-  return friend.online ? "在线，可发送" : "离线";
+  return friend.online ? "在线，可发送" : "离线，可排队";
 }
 
 function renderIdentityFingerprint() {
