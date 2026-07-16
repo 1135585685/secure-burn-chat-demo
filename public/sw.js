@@ -1,4 +1,4 @@
-const CACHE_VERSION = "secure-burn-v2026-05-03-1";
+const CACHE_VERSION = "secure-burn-v2026-07-16-interop-1";
 const ASSETS = ["/", "/index.html", "/styles.css", "/app.js", "/manifest.json"];
 
 self.addEventListener("install", (event) => {

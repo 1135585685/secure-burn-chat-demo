@@ -350,9 +350,15 @@ async function deriveAesKey(friendPublicJwk) {
     false,
     []
   );
-  return crypto.subtle.deriveKey(
+  const sharedSecret = await crypto.subtle.deriveBits(
     { name: "ECDH", public: publicKey },
     state.keyPair.privateKey,
+    256
+  );
+  const digest = await crypto.subtle.digest("SHA-256", sharedSecret);
+  return crypto.subtle.importKey(
+    "raw",
+    digest,
     { name: "AES-GCM", length: 256 },
     false,
     ["encrypt", "decrypt"]
@@ -622,11 +628,16 @@ function toast(message) {
 }
 
 function toBase64(bytes) {
-  return btoa(String.fromCharCode(...bytes));
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
 function fromBase64(value) {
-  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
 }
 
 function btoaUnicode(value) {

@@ -280,79 +280,87 @@ class MainActivity : ComponentActivity() {
                     }
 
                     if (selectedTab == AppTab.CHATS) {
-                        item {
-                            ConversationListCard(
-                                friends = friends,
-                                activeFriendId = activeFriendId,
-                                keyChangedFriends = keyChangedFriends,
-                                onSelect = {
-                                    activeFriendId = it
-                                    currentMessage = null
-                                }
-                            )
-                        }
-                        item {
-                            ChatCard(
-                                friend = activeFriend,
-                                canSend = canSend,
-                                message = message,
-                                onMessageChange = { message = it },
-                                currentMessage = currentMessage,
-                                countdownSeconds = currentMessage?.let { max(0, ((it.expiresAt - countdownNow) / 1000).toInt()) } ?: 0,
-                                keyChanged = activeKeyChanged,
-                                onVerifyKey = {
-                                    if (activeFriendId.isNotBlank()) {
-                                        keyChangedFriends.remove(activeFriendId)
-                                        status = "已在本机标记 ${activeFriendId} 的新指纹为已验证。"
-                                        statusTone = UiTone.SUCCESS
+                        if (activeFriend == null) {
+                            item {
+                                ConversationListCard(
+                                    friends = friends,
+                                    activeFriendId = activeFriendId,
+                                    keyChangedFriends = keyChangedFriends,
+                                    onSelect = {
+                                        activeFriendId = it
+                                        currentMessage = null
                                     }
-                                },
-                                onSend = {
-                                    val text = message.trim()
-                                    val pair = keyPair
-                                    val friend = activeFriend
-                                    if (text.isBlank() || pair == null || friend == null) return@ChatCard
-                                    if (!canSend) {
-                                        status = when {
-                                            activeKeyChanged -> "好友身份密钥已变更，重新验证指纹前已暂停发送。"
-                                            !connected -> "连接未就绪，消息没有发送。"
-                                            friend.confirmed -> "好友离线，暂不可发送。"
-                                            else -> "需要双方互相添加好友后才可发送。"
-                                        }
-                                        statusTone = UiTone.WARNING
-                                        return@ChatCard
-                                    }
-                                    try {
-                                        val payload = JSONObject()
-                                            .put("text", text)
-                                            .put("burnAfter", 900)
-                                            .put("sentAt", System.currentTimeMillis())
-                                        val encrypted = crypto.encrypt(pair, friend.publicKey, payload)
-                                        socket?.send(
-                                            JSONObject()
-                                                .put("type", "message")
-                                                .put("from", activeUserId)
-                                                .put("to", friend.userId)
-                                                .put("encrypted", encrypted)
-                                        )
-                                        currentMessage = VisibleMessage(
-                                            id = UUID.randomUUID().toString(),
-                                            senderKey = "me",
-                                            from = "我",
-                                            text = text,
-                                            mine = true,
-                                            status = "已加密发送",
-                                            expiresAt = System.currentTimeMillis() + 900_000L
-                                        )
+                                )
+                            }
+                        } else {
+                            item {
+                                ChatCard(
+                                    friend = activeFriend,
+                                    canSend = canSend,
+                                    message = message,
+                                    onMessageChange = { message = it },
+                                    currentMessage = currentMessage,
+                                    countdownSeconds = currentMessage?.let { max(0, ((it.expiresAt - countdownNow) / 1000).toInt()) } ?: 0,
+                                    keyChanged = activeKeyChanged,
+                                    onBack = {
+                                        activeFriendId = ""
+                                        currentMessage = null
                                         message = ""
-                                        status = "消息已本地加密并提交发送，等待服务端回执。"
-                                        statusTone = UiTone.INFO
-                                    } catch (error: Throwable) {
-                                        status = "加密失败，消息没有发送。"
-                                        statusTone = UiTone.DANGER
+                                    },
+                                    onVerifyKey = {
+                                        if (activeFriendId.isNotBlank()) {
+                                            keyChangedFriends.remove(activeFriendId)
+                                            status = "已在本机标记 ${activeFriendId} 的新指纹为已验证。"
+                                            statusTone = UiTone.SUCCESS
+                                        }
+                                    },
+                                    onSend = {
+                                        val text = message.trim()
+                                        val pair = keyPair
+                                        val friend = activeFriend
+                                        if (text.isBlank() || pair == null) return@ChatCard
+                                        if (!canSend) {
+                                            status = when {
+                                                activeKeyChanged -> "好友身份密钥已变更，重新验证指纹前已暂停发送。"
+                                                !connected -> "连接未就绪，消息没有发送。"
+                                                friend.confirmed -> "好友离线，暂不可发送。"
+                                                else -> "需要双方互相添加好友后才可发送。"
+                                            }
+                                            statusTone = UiTone.WARNING
+                                            return@ChatCard
+                                        }
+                                        try {
+                                            val payload = JSONObject()
+                                                .put("text", text)
+                                                .put("burnAfter", 900)
+                                                .put("sentAt", System.currentTimeMillis())
+                                            val encrypted = crypto.encrypt(pair, friend.publicKey, payload)
+                                            socket?.send(
+                                                JSONObject()
+                                                    .put("type", "message")
+                                                    .put("from", activeUserId)
+                                                    .put("to", friend.userId)
+                                                    .put("encrypted", encrypted)
+                                            )
+                                            currentMessage = VisibleMessage(
+                                                id = UUID.randomUUID().toString(),
+                                                senderKey = "me",
+                                                from = "我",
+                                                text = text,
+                                                mine = true,
+                                                status = "已加密发送",
+                                                expiresAt = System.currentTimeMillis() + 900_000L
+                                            )
+                                            message = ""
+                                            status = "消息已本地加密并提交发送，等待服务端回执。"
+                                            statusTone = UiTone.INFO
+                                        } catch (error: Throwable) {
+                                            status = "加密失败，消息没有发送。"
+                                            statusTone = UiTone.DANGER
+                                        }
                                     }
-                                }
-                            )
+                                )
+                            }
                         }
                     }
 
@@ -1055,12 +1063,19 @@ class MainActivity : ComponentActivity() {
         currentMessage: VisibleMessage?,
         countdownSeconds: Int,
         keyChanged: Boolean,
+        onBack: () -> Unit,
         onVerifyKey: () -> Unit,
         onSend: () -> Unit
     ) {
         SectionCard {
-            Text(friend?.userId ?: "请选择好友", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Text(chatSubtitle(friend, keyChanged), color = if (keyChanged) Color(0xFFB91C1C) else Color(0xFF64748B))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text("返回") }
+                Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(friend?.userId ?: "请选择好友", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text(chatSubtitle(friend, keyChanged), color = if (keyChanged) Color(0xFFB91C1C) else Color(0xFF64748B), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                StatusDot(contactTone(friend, keyChanged))
+            }
             if (keyChanged) {
                 Spacer(Modifier.height(8.dp))
                 NoticeBlock("好友身份密钥已变化。这可能是换设备，也可能是中间人攻击。重新核对指纹前，发送已暂停。", UiTone.DANGER)
