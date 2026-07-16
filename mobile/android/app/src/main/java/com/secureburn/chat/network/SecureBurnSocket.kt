@@ -9,6 +9,7 @@ import org.json.JSONObject
 
 class SecureBurnSocket(
     private val baseUrl: String,
+    private val clientInfo: JSONObject,
     private val onEvent: (JSONObject) -> Unit
 ) {
     private val client = OkHttpClient()
@@ -19,7 +20,14 @@ class SecureBurnSocket(
         val request = Request.Builder().url(wsUrl).build()
         socket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                webSocket.send(JSONObject().put("type", "hello").put("userId", userId).put("publicKey", publicKey).toString())
+                webSocket.send(
+                    JSONObject()
+                        .put("type", "hello")
+                        .put("userId", userId)
+                        .put("publicKey", publicKey)
+                        .put("client", clientInfo)
+                        .toString()
+                )
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {

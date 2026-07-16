@@ -13,6 +13,7 @@ const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL || "";
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const ADMIN_CAPTURE_MESSAGES = process.env.ADMIN_CAPTURE_MESSAGES === "true";
+const MIN_ANDROID_VERSION_CODE = Number(process.env.MIN_ANDROID_VERSION_CODE || 1);
 const clients = new Map();
 const offlineQueues = new Map();
 const OFFLINE_TTL_MS = 30 * 1000;
@@ -43,7 +44,8 @@ const server = createServer(async (req, res) => {
         service: "secure-burn-chat-demo",
         persistence: usePostgres ? "postgres" : "file",
         offlineQueue: useUpstash ? "upstash" : "memory",
-        onlineUsers: clients.size
+        onlineUsers: clients.size,
+        minAndroidVersionCode: MIN_ANDROID_VERSION_CODE
       });
     }
 
@@ -83,6 +85,15 @@ wss.on("connection", (socket) => {
     if (packet.type === "hello") {
       userId = sanitizeId(packet.userId);
       if (!userId) return send(socket, { type: "error", message: "Invalid user id" });
+      if (Number(packet.client?.versionCode || 0) < MIN_ANDROID_VERSION_CODE) {
+        send(socket, {
+          type: "clientOutdated",
+          minVersionCode: MIN_ANDROID_VERSION_CODE,
+          message: "当前客户端版本过旧，请更新后继续使用。"
+        });
+        socket.close(1008, "client outdated");
+        return;
+      }
       if (isPublicKey(packet.publicKey)) {
         await registerUser(userId, packet.publicKey);
       }

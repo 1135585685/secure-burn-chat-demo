@@ -98,6 +98,7 @@ class MainActivity : ComponentActivity() {
         var message by remember { mutableStateOf("") }
         var inviteCode by remember { mutableStateOf("") }
         var status by remember { mutableStateOf("未连接") }
+        var statusTone by remember { mutableStateOf(UiTone.INFO) }
         var fingerprint by remember { mutableStateOf("未生成") }
         var connected by remember { mutableStateOf(false) }
         var activeFriendId by remember { mutableStateOf("") }
@@ -105,15 +106,21 @@ class MainActivity : ComponentActivity() {
         var countdownNow by remember { mutableStateOf(System.currentTimeMillis()) }
         var wipeConfirm by remember { mutableStateOf(false) }
         val friends = remember { mutableStateListOf<Friend>() }
+        val keyChangedFriends = remember { mutableStateListOf<String>() }
         val scope = rememberCoroutineScope()
         val activeFriend = friends.firstOrNull { it.userId == activeFriendId }
-        val canSend = connected && activeUserId.isNotBlank() && activeFriend?.confirmed == true && activeFriend.online
+        val activeKeyChanged = activeFriendId in keyChangedFriends
+        val canSend = connected && activeUserId.isNotBlank() && activeFriend?.confirmed == true && activeFriend.online && !activeKeyChanged
 
         LaunchedEffect(currentMessage?.id) {
             while (currentMessage != null) {
                 countdownNow = System.currentTimeMillis()
                 val expiresAt = currentMessage?.expiresAt ?: 0L
-                if (expiresAt <= countdownNow) currentMessage = null
+                if (expiresAt <= countdownNow) {
+                    currentMessage = null
+                    status = "最后一条消息已超过 15 分钟并从本机清除。"
+                    statusTone = UiTone.WARNING
+                }
                 delay(500)
             }
         }
@@ -163,19 +170,24 @@ class MainActivity : ComponentActivity() {
                                             onReady = { ready ->
                                                 connected = true
                                                 status = "已连接 Render 服务：${ready.optString("userId", clean)}"
-                                                replaceFriends(friends, parseFriends(ready.optJSONArray("friends")))
+                                                statusTone = UiTone.SUCCESS
+                                                replaceFriends(friends, parseFriends(ready.optJSONArray("friends")), keyChangedFriends)
                                                 saveFriends(clean, friends)
                                             },
                                             onFriends = { incoming ->
-                                                replaceFriends(friends, incoming)
+                                                replaceFriends(friends, incoming, keyChangedFriends)
                                                 saveFriends(clean, friends)
                                             },
-                                            onStatus = { status = it },
+                                            onStatus = { text, tone ->
+                                                status = text
+                                                statusTone = tone
+                                            },
                                             onMessage = { packet ->
                                                 val from = packet.optString("from")
                                                 val friend = friends.firstOrNull { it.userId == from }
                                                 if (friend == null) {
                                                     status = "收到未知联系人密文：$from"
+                                                    statusTone = UiTone.WARNING
                                                     return@createSocket
                                                 }
                                                 try {
@@ -191,14 +203,19 @@ class MainActivity : ComponentActivity() {
                                                         expiresAt = System.currentTimeMillis() + payload.optLong("burnAfter", 900L) * 1000L
                                                     )
                                                     status = "收到来自 $from 的端到端加密消息"
+                                                    statusTone = UiTone.SUCCESS
                                                 } catch (error: Throwable) {
                                                     status = "收到消息，但解密失败。"
+                                                    statusTone = UiTone.DANGER
                                                 }
                                             },
                                             onClose = {
                                                 connected = false
                                                 markOffline(friends)
-                                                status = it
+                                                if (!status.contains("版本过旧")) {
+                                                    status = it
+                                                }
+                                                statusTone = UiTone.DANGER
                                             }
                                         )
                                         socket!!.connect(clean, jwk)
@@ -206,19 +223,24 @@ class MainActivity : ComponentActivity() {
                                             activeUserId = clean
                                             fingerprint = fp
                                             inviteCode = makeInvite(clean, jwk, fp)
-                                            replaceFriends(friends, merged)
+                                            replaceFriends(friends, merged, keyChangedFriends)
                                             saveFriends(clean, friends)
                                             prefs.edit().putString("lastUserId", clean).apply()
                                             status = "正在连接 Render 服务..."
+                                            statusTone = UiTone.INFO
                                         }
                                     } catch (error: Throwable) {
-                                        runOnUiThread { status = "登入失败：${error.message ?: "服务不可用"}" }
+                                        runOnUiThread {
+                                            status = "登入失败：${error.message ?: "服务不可用"}"
+                                            statusTone = UiTone.DANGER
+                                        }
                                     }
                                 }
                             },
                             onCopyInvite = {
                                 copyText("Secure Burn 邀请码", inviteCode)
                                 status = "邀请代码已复制。"
+                                statusTone = UiTone.SUCCESS
                             },
                             onLogout = {
                                 socket?.close()
@@ -233,8 +255,22 @@ class MainActivity : ComponentActivity() {
                                 currentMessage = null
                                 friends.clear()
                                 status = "已退出，本机当前会话已清空。"
+                                statusTone = UiTone.INFO
                             },
                             onWipe = { wipeConfirm = true }
+                        )
+                    }
+
+                    item {
+                        CommercialStatusCard(
+                            status = status,
+                            tone = statusTone,
+                            connected = connected,
+                            activeUserId = activeUserId,
+                            activeFriend = activeFriend,
+                            keyChanged = activeKeyChanged,
+                            currentMessage = currentMessage,
+                            countdownSeconds = currentMessage?.let { max(0, ((it.expiresAt - countdownNow) / 1000).toInt()) } ?: 0
                         )
                     }
 
@@ -247,6 +283,7 @@ class MainActivity : ComponentActivity() {
                             onAddFriend = {
                                 if (activeUserId.isBlank()) {
                                     status = "请先登入。"
+                                    statusTone = UiTone.WARNING
                                     return@FriendManagerCard
                                 }
                                 scope.launch(Dispatchers.IO) {
@@ -256,15 +293,19 @@ class MainActivity : ComponentActivity() {
                                         val result = api.addFriend(activeUserId, friend.userId, friend.publicKey)
                                         val incoming = parseFriends(result.optJSONArray("friends"))
                                         runOnUiThread {
-                                            replaceFriends(friends, incoming)
+                                            replaceFriends(friends, incoming, keyChangedFriends)
                                             saveFriends(activeUserId, friends)
                                             activeFriendId = friend.userId
                                             friendId = ""
                                             friendInvite = ""
                                             status = "已添加好友 ${friend.userId}，等待双向确认后可通信。"
+                                            statusTone = UiTone.SUCCESS
                                         }
                                     } catch (error: Throwable) {
-                                        runOnUiThread { status = "添加失败：请确认好友 ID 已进入过系统，或粘贴完整邀请代码。" }
+                                        runOnUiThread {
+                                            status = "添加失败：请确认好友 ID 已进入过系统，或粘贴完整邀请代码。"
+                                            statusTone = UiTone.WARNING
+                                        }
                                     }
                                 }
                             }
@@ -286,14 +327,19 @@ class MainActivity : ComponentActivity() {
                                         val result = api.deleteFriend(activeUserId, id)
                                         val incoming = parseFriends(result.optJSONArray("friends"))
                                         runOnUiThread {
-                                            replaceFriends(friends, incoming)
+                                            replaceFriends(friends, incoming, keyChangedFriends)
                                             saveFriends(activeUserId, friends)
                                             if (activeFriendId == id) activeFriendId = ""
+                                            keyChangedFriends.remove(id)
                                             currentMessage = null
                                             status = "已删除好友：$id"
+                                            statusTone = UiTone.SUCCESS
                                         }
                                     } catch (error: Throwable) {
-                                        runOnUiThread { status = "删除好友失败：${error.message ?: "服务不可用"}" }
+                                        runOnUiThread {
+                                            status = "删除好友失败：${error.message ?: "服务不可用"}"
+                                            statusTone = UiTone.DANGER
+                                        }
                                     }
                                 }
                             }
@@ -308,13 +354,27 @@ class MainActivity : ComponentActivity() {
                             onMessageChange = { message = it },
                             currentMessage = currentMessage,
                             countdownSeconds = currentMessage?.let { max(0, ((it.expiresAt - countdownNow) / 1000).toInt()) } ?: 0,
+                            keyChanged = activeKeyChanged,
+                            onVerifyKey = {
+                                if (activeFriendId.isNotBlank()) {
+                                    keyChangedFriends.remove(activeFriendId)
+                                    status = "已在本机标记 ${activeFriendId} 的新指纹为已验证。"
+                                    statusTone = UiTone.SUCCESS
+                                }
+                            },
                             onSend = {
                                 val text = message.trim()
                                 val pair = keyPair
                                 val friend = activeFriend
                                 if (text.isBlank() || pair == null || friend == null) return@ChatCard
                                 if (!canSend) {
-                                    status = if (friend.confirmed) "好友离线，暂不可发送。" else "需要双方互相添加好友后才可发送。"
+                                    status = when {
+                                        activeKeyChanged -> "好友身份密钥已变更，重新验证指纹前已暂停发送。"
+                                        !connected -> "连接未就绪，消息没有发送。"
+                                        friend.confirmed -> "好友离线，暂不可发送。"
+                                        else -> "需要双方互相添加好友后才可发送。"
+                                    }
+                                    statusTone = UiTone.WARNING
                                     return@ChatCard
                                 }
                                 try {
@@ -340,8 +400,11 @@ class MainActivity : ComponentActivity() {
                                         expiresAt = System.currentTimeMillis() + 900_000L
                                     )
                                     message = ""
+                                    status = "消息已本地加密并提交发送，等待服务端回执。"
+                                    statusTone = UiTone.INFO
                                 } catch (error: Throwable) {
                                     status = "加密失败，消息没有发送。"
+                                    statusTone = UiTone.DANGER
                                 }
                             }
                         )
@@ -385,6 +448,7 @@ class MainActivity : ComponentActivity() {
                                         currentMessage = null
                                         friends.clear()
                                         status = "所有本机记录已删除，并已请求服务端删除资料。"
+                                        statusTone = UiTone.SUCCESS
                                     }
                                 }
                             }) { Text("确认删除", color = Color(0xFFB91C1C)) }
@@ -511,6 +575,58 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
+    private fun CommercialStatusCard(
+        status: String,
+        tone: UiTone,
+        connected: Boolean,
+        activeUserId: String,
+        activeFriend: Friend?,
+        keyChanged: Boolean,
+        currentMessage: VisibleMessage?,
+        countdownSeconds: Int
+    ) {
+        SectionCard {
+            Text("系统状态", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(10.dp))
+            NoticeBlock(status, tone)
+            Spacer(Modifier.height(10.dp))
+            StatusRow("服务器连接", if (connected) "已连接" else if (activeUserId.isBlank()) "未登入" else "断开或重连中", if (connected) UiTone.SUCCESS else UiTone.WARNING)
+            StatusRow("WebSocket", if (connected) "实时通道正常" else "不可用，消息不会发送", if (connected) UiTone.SUCCESS else UiTone.DANGER)
+            StatusRow("本机身份密钥", if (activeUserId.isBlank()) "未加载" else "已在 Android Keystore 中加载", if (activeUserId.isBlank()) UiTone.WARNING else UiTone.SUCCESS)
+            StatusRow("联系人安全", contactState(activeFriend, keyChanged), contactTone(activeFriend, keyChanged))
+            StatusRow("消息窗口", if (currentMessage == null) "空，当前不保留聊天记录" else "最后一条消息 ${formatCountdown(countdownSeconds)} 后清除", if (currentMessage == null) UiTone.INFO else UiTone.WARNING)
+            StatusRow("客户端版本", "Android ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", UiTone.INFO)
+        }
+    }
+
+    @Composable
+    private fun NoticeBlock(text: String, tone: UiTone) {
+        val colors = toneColors(tone)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(colors.background, RoundedCornerShape(10.dp))
+                .border(1.dp, colors.border, RoundedCornerShape(10.dp))
+                .padding(10.dp)
+        ) {
+            Text(toneTitle(tone), color = colors.foreground, fontWeight = FontWeight.Bold)
+            Text(text, color = colors.foreground, style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+
+    @Composable
+    private fun StatusRow(label: String, value: String, tone: UiTone) {
+        Row(
+            Modifier.fillMaxWidth().padding(vertical = 5.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top
+        ) {
+            Text(label, color = Color(0xFF64748B), modifier = Modifier.weight(0.38f))
+            Text(value, color = toneColors(tone).foreground, modifier = Modifier.weight(0.62f), fontWeight = FontWeight.SemiBold)
+        }
+    }
+
+    @Composable
     private fun FriendRow(friend: Friend, selected: Boolean, onSelect: () -> Unit, onDelete: () -> Unit) {
         Row(
             modifier = Modifier
@@ -544,11 +660,21 @@ class MainActivity : ComponentActivity() {
         onMessageChange: (String) -> Unit,
         currentMessage: VisibleMessage?,
         countdownSeconds: Int,
+        keyChanged: Boolean,
+        onVerifyKey: () -> Unit,
         onSend: () -> Unit
     ) {
         SectionCard {
             Text(friend?.userId ?: "请选择好友", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Text(chatSubtitle(friend), color = Color(0xFF64748B))
+            Text(chatSubtitle(friend, keyChanged), color = if (keyChanged) Color(0xFFB91C1C) else Color(0xFF64748B))
+            if (keyChanged) {
+                Spacer(Modifier.height(8.dp))
+                NoticeBlock("好友身份密钥已变化。这可能是换设备，也可能是中间人攻击。重新核对指纹前，发送已暂停。", UiTone.DANGER)
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = onVerifyKey, modifier = Modifier.fillMaxWidth()) {
+                    Text("我已通过可信渠道核对新指纹")
+                }
+            }
             Spacer(Modifier.height(12.dp))
             Box(
                 modifier = Modifier
@@ -610,25 +736,37 @@ class MainActivity : ComponentActivity() {
         jwk: JSONObject,
         onReady: (JSONObject) -> Unit,
         onFriends: (List<Friend>) -> Unit,
-        onStatus: (String) -> Unit,
+        onStatus: (String, UiTone) -> Unit,
         onMessage: (JSONObject) -> Unit,
         onClose: (String) -> Unit
     ): SecureBurnSocket {
-        return SecureBurnSocket(BuildConfig.SERVER_BASE_URL) { event ->
+        val clientInfo = JSONObject()
+            .put("platform", "android")
+            .put("versionName", BuildConfig.VERSION_NAME)
+            .put("versionCode", BuildConfig.VERSION_CODE)
+        return SecureBurnSocket(BuildConfig.SERVER_BASE_URL, clientInfo) { event ->
             runOnUiThread {
                 when (event.optString("type")) {
                     "ready" -> onReady(event)
                     "friends" -> onFriends(parseFriends(event.optJSONArray("friends")))
                     "message" -> onMessage(event)
-                    "sent" -> onStatus(if (event.optString("delivery") == "delivered") "密文已送达：${event.optString("to")}" else "密文已进入短期队列。")
-                    "delivered" -> onStatus("密文已送达：${event.optString("to")}")
-                    "expired" -> onStatus("密文未送达并已过期。")
+                    "sent" -> {
+                        when (event.optString("delivery")) {
+                            "delivered" -> onStatus("密文已送达：${event.optString("to")}", UiTone.SUCCESS)
+                            "queued" -> onStatus("密文已进入短期离线队列。", UiTone.INFO)
+                            "rejected" -> onStatus("密文被拒收：对方队列已满或策略拒绝。", UiTone.DANGER)
+                            else -> onStatus("服务端已接收发送请求。", UiTone.INFO)
+                        }
+                    }
+                    "delivered" -> onStatus("密文已送达：${event.optString("to")}", UiTone.SUCCESS)
+                    "expired" -> onStatus("密文未送达并已过期：${event.optString("reason", "超过 TTL")}", UiTone.WARNING)
                     "keyChanged" -> {
                         onFriends(parseFriends(event.optJSONArray("friends")))
-                        onStatus("${event.optString("userId")} 的身份密钥发生变化，请重新核对指纹。")
+                        onStatus("${event.optString("userId")} 的身份密钥发生变化，请重新核对指纹。", UiTone.DANGER)
                     }
                     "accountDeleted" -> onClose("账号记录已删除。")
-                    "error" -> onStatus(event.optString("message", "服务端返回错误。"))
+                    "clientOutdated" -> onStatus(event.optString("message", "当前客户端版本过旧，请更新后继续使用。"), UiTone.DANGER)
+                    "error" -> onStatus(event.optString("message", "服务端返回错误。"), UiTone.WARNING)
                     "closed" -> onClose("连接已断开。")
                     "socketError" -> onClose("连接失败：${event.optString("message")}")
                 }
@@ -673,7 +811,16 @@ class MainActivity : ComponentActivity() {
         }.filter { it.userId.isNotBlank() }
     }
 
-    private fun replaceFriends(target: MutableList<Friend>, incoming: List<Friend>) {
+    private fun replaceFriends(target: MutableList<Friend>, incoming: List<Friend>, keyChangedFriends: MutableList<String>? = null) {
+        val previous = target.associateBy { it.userId }
+        if (keyChangedFriends != null) {
+            for (friend in incoming) {
+                val old = previous[friend.userId]
+                if (old != null && old.fingerprint != friend.fingerprint && friend.userId !in keyChangedFriends) {
+                    keyChangedFriends.add(friend.userId)
+                }
+            }
+        }
         target.clear()
         target.addAll(incoming.sortedBy { it.userId })
     }
@@ -736,11 +883,41 @@ class MainActivity : ComponentActivity() {
         return if (friend.online) "在线，可发送" else "离线"
     }
 
-    private fun chatSubtitle(friend: Friend?): String {
+    private fun chatSubtitle(friend: Friend?, keyChanged: Boolean = false): String {
         if (friend == null) return "双方互相添加且在线后才可发送。"
+        if (keyChanged) return "身份密钥已变更，重新验证前已暂停发送。"
         if (!friend.confirmed) return "等待对方也添加你，完成双向确认。"
         if (!friend.online) return "好友离线，暂不可发送。"
         return "双向确认且在线，可发送端到端加密消息。"
+    }
+
+    private fun contactState(friend: Friend?, keyChanged: Boolean): String {
+        if (friend == null) return "未选择联系人"
+        if (keyChanged) return "密钥已变更，发送已暂停"
+        if (!friend.confirmed) return "未双向确认，暂不可发送"
+        if (!friend.online) return "已确认但离线"
+        return "已确认且在线"
+    }
+
+    private fun contactTone(friend: Friend?, keyChanged: Boolean): UiTone {
+        if (friend == null) return UiTone.INFO
+        if (keyChanged) return UiTone.DANGER
+        if (!friend.confirmed || !friend.online) return UiTone.WARNING
+        return UiTone.SUCCESS
+    }
+
+    private fun toneTitle(tone: UiTone): String = when (tone) {
+        UiTone.SUCCESS -> "正常"
+        UiTone.INFO -> "信息"
+        UiTone.WARNING -> "需要注意"
+        UiTone.DANGER -> "高风险"
+    }
+
+    private fun toneColors(tone: UiTone): ToneColors = when (tone) {
+        UiTone.SUCCESS -> ToneColors(Color(0xFFD1FAE5), Color(0xFFA7F3D0), Color(0xFF065F46))
+        UiTone.INFO -> ToneColors(Color(0xFFE0F2FE), Color(0xFFBAE6FD), Color(0xFF075985))
+        UiTone.WARNING -> ToneColors(Color(0xFFFEF3C7), Color(0xFFFDE68A), Color(0xFF92400E))
+        UiTone.DANGER -> ToneColors(Color(0xFFFEE2E2), Color(0xFFFECACA), Color(0xFF991B1B))
     }
 
     private fun formatCountdown(totalSeconds: Int): String {
@@ -748,6 +925,19 @@ class MainActivity : ComponentActivity() {
         val seconds = totalSeconds % 60
         return "$minutes:${seconds.toString().padStart(2, '0')}"
     }
+
+    private enum class UiTone {
+        SUCCESS,
+        INFO,
+        WARNING,
+        DANGER
+    }
+
+    private data class ToneColors(
+        val background: Color,
+        val border: Color,
+        val foreground: Color
+    )
 
     private data class VisibleMessage(
         val id: String,
