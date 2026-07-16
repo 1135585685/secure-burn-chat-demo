@@ -51,7 +51,7 @@ Implemented in the new app source:
 - session destroy workflow
 - Rust crypto core skeleton under `rust/crypto_core`
 
-Build once Flutter SDK is installed:
+Build:
 
 ```bash
 cd mobile/flutter_secure_app
@@ -59,7 +59,18 @@ flutter pub get
 flutter build apk --debug
 ```
 
-On this machine, Homebrew failed to download Flutter and Rust due upstream download/index errors, so the source is prepared but not locally compiled in this pass.
+Local toolchains have been installed and verified on this machine:
+
+- Flutter 3.44.6 / Dart 3.12.2
+- Rust 1.97.0
+- Android SDK 36 with NDK 28.2 and CMake 3.22.1
+
+The debug APK builds successfully with:
+
+```bash
+cd mobile/flutter_secure_app
+flutter build apk --debug --android-skip-build-dependency-validation
+```
 
 ## Legacy Web Demo
 

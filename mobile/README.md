@@ -30,7 +30,7 @@ Current server default:
 https://secure-burn-chat-demo.onrender.com
 ```
 
-Build the replacement Flutter app after Flutter SDK is available:
+Build the replacement Flutter app:
 
 ```bash
 cd mobile/flutter_secure_app

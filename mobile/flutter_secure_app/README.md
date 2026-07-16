@@ -16,10 +16,17 @@ Security note:
 
 The server is blind to plaintext. The app encrypts before upload and destroys local session material when a session is terminated. The Rust FFI module is scaffolded for production hardening; the Flutter MVP currently uses Dart cryptography primitives until Flutter/Rust toolchains are available locally.
 
-Build after Flutter SDK is installed:
+Build:
 
 ```bash
 cd mobile/flutter_secure_app
 flutter pub get
 flutter build apk --debug
 ```
+
+Verified local tooling:
+
+- `flutter analyze`
+- `flutter test`
+- `flutter build apk --debug --android-skip-build-dependency-validation`
+- `cargo check` in `rust/crypto_core`

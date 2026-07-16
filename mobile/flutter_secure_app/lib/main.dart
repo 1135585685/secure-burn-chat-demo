@@ -39,7 +39,7 @@ class AppShell extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tab = ref.watch(selectedTabProvider);
-    final pages = const [
+    const pages = [
       SessionPage(),
       IdentityPage(),
       ChatPage(),
