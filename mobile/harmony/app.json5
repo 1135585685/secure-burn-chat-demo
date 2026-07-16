@@ -1,0 +1,9 @@
+{
+  "app": {
+    "bundleName": "com.secureburn.chat",
+    "vendor": "secureburn",
+    "versionCode": 1,
+    "versionName": "0.1.0"
+  }
+}
+

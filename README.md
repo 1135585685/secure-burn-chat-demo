@@ -85,6 +85,24 @@ ADMIN_CAPTURE_MESSAGES=true
 
 开启后，后台会保存并展示最近 200 条测试消息的密文 body；前端也会随消息额外提交一份 debug 明文副本。不要在生产环境开启。
 
+## 移动端 App
+
+移动端工程在：
+
+```text
+mobile/
+```
+
+- `mobile/android`：Android Kotlin 原生 starter，使用 Android Keystore、OkHttp WebSocket、AES-GCM payload，并默认连接 Render 服务。
+- `mobile/harmony`：HarmonyOS ArkTS starter，包含页面、HTTP/WebSocket 客户端和 HUKS 集成点。需要 DevEco Studio 和目标 HarmonyOS SDK 完成 HUKS 参数与编译配置。
+- `mobile/shared/PROTOCOL.md`：移动端和服务端协议说明。
+
+安全要求：
+
+- 不使用 WebView 作为生产客户端。
+- 私钥必须留在 Android Keystore / HarmonyOS HUKS。
+- 生产前必须用官方 Signal/libsignal 替换当前 `demo-ecdh-v1`。
+
 ## 安全说明
 
 这是原型 Demo，不是生产级安全产品。当前版本已经把身份私钥迁移到 IndexedDB 中的不可导出 `CryptoKey`，但网页端仍然无法防止恶意浏览器扩展、被篡改的前端代码、截图、调试器和被攻破设备。

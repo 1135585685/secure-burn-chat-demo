@@ -1,0 +1,16 @@
+{
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "srcEntry": "./entry/src/main/ets/entryability/EntryAbility.ets",
+    "description": "Secure Burn HarmonyOS client",
+    "mainElement": "EntryAbility",
+    "deviceTypes": ["phone"],
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.INTERNET"
+      }
+    ]
+  }
+}
+
