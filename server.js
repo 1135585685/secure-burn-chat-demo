@@ -44,7 +44,7 @@ const server = createServer(async (req, res) => {
         service: "secure-burn-chat-demo",
         persistence: usePostgres ? "postgres" : "file",
         offlineQueue: useUpstash ? "upstash" : "memory",
-        onlineUsers: clients.size,
+        onlineUsers: onlineUserCount(),
         minAndroidVersionCode: MIN_ANDROID_VERSION_CODE
       });
     }
@@ -85,7 +85,7 @@ wss.on("connection", (socket) => {
     if (packet.type === "hello") {
       userId = sanitizeId(packet.userId);
       if (!userId) return send(socket, { type: "error", message: "Invalid user id" });
-      if (Number(packet.client?.versionCode || 0) < MIN_ANDROID_VERSION_CODE) {
+      if (packet.client?.platform === "android" && Number(packet.client?.versionCode || 0) < MIN_ANDROID_VERSION_CODE) {
         send(socket, {
           type: "clientOutdated",
           minVersionCode: MIN_ANDROID_VERSION_CODE,
@@ -97,9 +97,9 @@ wss.on("connection", (socket) => {
       if (isPublicKey(packet.publicKey)) {
         await registerUser(userId, packet.publicKey);
       }
-      clients.set(userId, socket);
+      addClient(userId, socket);
       send(socket, { type: "ready", userId, friends: getFriends(userId), adminCaptureMessages: ADMIN_CAPTURE_MESSAGES });
-      recordFlow("client.connected", { userId, onlineUsers: clients.size });
+      recordFlow("client.connected", { userId, onlineUsers: onlineUserCount(), connections: connectionCount(userId) });
       broadcastPresence(userId);
       await flushOffline(userId);
       return;
@@ -132,8 +132,8 @@ wss.on("connection", (socket) => {
   });
 
   socket.on("close", () => {
-    if (userId && clients.get(userId) === socket) clients.delete(userId);
-    if (userId) recordFlow("client.disconnected", { userId, onlineUsers: clients.size });
+    if (userId) removeClient(userId, socket);
+    if (userId) recordFlow("client.disconnected", { userId, onlineUsers: onlineUserCount(), connections: connectionCount(userId) });
     if (userId) broadcastPresence(userId);
   });
 });
@@ -161,8 +161,7 @@ async function handleApi(req, res, url) {
     if (!userId) return json(res, 400, { ok: false, error: "Invalid user id" });
     await deleteUser(userId);
     sendUser(userId, { type: "accountDeleted" });
-    const socket = clients.get(userId);
-    if (socket) socket.close(1000, "account deleted");
+    for (const socket of getClientSockets(userId)) socket.close(1000, "account deleted");
     return json(res, 200, { ok: true });
   }
 
@@ -502,9 +501,8 @@ function securityHeaders(filePath = "") {
 }
 
 async function deliverOrQueue(packet) {
-  const target = clients.get(packet.to);
-  if (target?.readyState === target.OPEN) {
-    send(target, packet);
+  if (isOnline(packet.to)) {
+    sendUser(packet.to, packet);
     recordFlow("message.delivered", { from: packet.from, to: packet.to, messageId: packet.id });
     return "delivered";
   }
@@ -563,7 +561,7 @@ async function flushOffline(userId) {
     await redisCommand(["DEL", offlineQueueKey(userId)]);
     for (const packet of queue) {
       if (Date.now() - packet.createdAt < OFFLINE_TTL_MS) {
-      send(clients.get(userId), packet);
+      sendUser(userId, packet);
       sendUser(packet.from, { type: "delivered", id: packet.id, to: userId });
       recordFlow("message.delivered", { from: packet.from, to: userId, messageId: packet.id, fromQueue: true });
     } else {
@@ -579,7 +577,7 @@ async function flushOffline(userId) {
   offlineQueues.delete(userId);
   for (const packet of queue) {
     if (Date.now() - packet.createdAt < OFFLINE_TTL_MS) {
-      send(clients.get(userId), packet);
+      sendUser(userId, packet);
       sendUser(packet.from, { type: "delivered", id: packet.id, to: userId });
       recordFlow("message.delivered", { from: packet.from, to: userId, messageId: packet.id, fromQueue: true });
     }
@@ -591,7 +589,7 @@ function send(socket, packet) {
 }
 
 function sendUser(userId, packet) {
-  send(clients.get(userId), packet);
+  for (const socket of getClientSockets(userId)) send(socket, packet);
 }
 
 async function redisCommand(command) {
@@ -762,9 +760,40 @@ function captureMessage({ packet, sealed, delivery }) {
   while (messageCaptures.length > MAX_MESSAGE_CAPTURES) messageCaptures.shift();
 }
 
+function addClient(userId, socket) {
+  const sockets = clients.get(userId) || new Set();
+  sockets.add(socket);
+  clients.set(userId, sockets);
+}
+
+function removeClient(userId, socket) {
+  const sockets = clients.get(userId);
+  if (!sockets) return;
+  sockets.delete(socket);
+  if (sockets.size) clients.set(userId, sockets);
+  else clients.delete(userId);
+}
+
+function getClientSockets(userId) {
+  const sockets = clients.get(userId);
+  if (!sockets) return [];
+  return [...sockets].filter((socket) => socket.readyState === socket.OPEN);
+}
+
+function connectionCount(userId) {
+  return getClientSockets(userId).length;
+}
+
+function onlineUserCount() {
+  let count = 0;
+  for (const userId of clients.keys()) {
+    if (isOnline(userId)) count += 1;
+  }
+  return count;
+}
+
 function isOnline(userId) {
-  const socket = clients.get(userId);
-  return Boolean(socket && socket.readyState === socket.OPEN);
+  return getClientSockets(userId).length > 0;
 }
 
 function areMutualFriends(a, b) {
