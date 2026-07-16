@@ -1,25 +1,28 @@
 # Secure Burn Mobile
 
-This directory contains native mobile app starters for the Secure Burn protocol.
+This directory now contains the migration from the original demo app to the v3.0 product architecture.
 
-Security constraints:
+Primary client:
 
-- Do not use WebView as the production client.
-- Private identity keys must stay in platform key storage.
-- The server must not receive private keys.
-- The server must not receive plaintext unless explicit test capture mode is enabled.
-- Message encryption remains end-to-end. The current demo protocol is `demo-ecdh-v1`; replace it with Signal/libsignal before production use.
+- `flutter_secure_app/`: replacement Flutter app for the High Security Anonymous E2EE Messaging Platform v3.0 architecture.
 
-Projects:
+Compatibility prototypes:
 
-- `android/`: Kotlin Android starter using Android Keystore, OkHttp WebSocket, and AES-GCM payloads.
-- `harmony/`: HarmonyOS ArkTS starter structure using HUKS as the intended key storage layer.
-- `shared/`: protocol notes and payload examples.
+- `android/`: previous Kotlin Android prototype. Kept for reference and APK continuity.
+- `harmony/`: HarmonyOS starter structure.
+- `shared/`: legacy protocol notes.
 
-Required local tooling:
+Target architecture:
 
-- Android: Android Studio with Android SDK installed.
-- HarmonyOS: DevEco Studio with HarmonyOS SDK installed.
+- Flutter UI
+- Riverpod state management
+- Repository pattern
+- Rust crypto core skeleton
+- Anonymous identity
+- Device registration
+- Ephemeral secure sessions
+- Session-based destruction
+- Blind server message relay
 
 Current server default:
 
@@ -27,11 +30,14 @@ Current server default:
 https://secure-burn-chat-demo.onrender.com
 ```
 
-For local development:
+Build the replacement Flutter app after Flutter SDK is available:
 
-```text
-http://10.0.2.2:8787
+```bash
+cd mobile/flutter_secure_app
+flutter pub get
+flutter build apk --debug
 ```
 
-Android emulator uses `10.0.2.2` to reach your Mac localhost.
+Security note:
 
+The current replacement client implements the target app and API flow, but production security still requires completing Rust FFI integration, independent audit, hardened multi-device key registration, and platform release builds.

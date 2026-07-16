@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, join, normalize } from "node:path";
 import pg from "pg";
@@ -20,7 +20,7 @@ const OFFLINE_TTL_MS = 30 * 1000;
 const MAX_OFFLINE_QUEUE_PER_USER = 20;
 const MAX_FLOW_EVENTS = 300;
 const MAX_MESSAGE_CAPTURES = 200;
-let store = { users: {}, friends: {} };
+let store = { users: {}, friends: {}, devices: {}, sessions: {}, messages: {}, keyMetadata: {} };
 let dbPool = null;
 const flowEvents = [];
 const messageCaptures = [];
@@ -115,7 +115,7 @@ wss.on("connection", (socket) => {
 
       const sealed = {
         type: "message",
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         from,
         to,
         encrypted: packet.encrypted,
@@ -140,6 +140,10 @@ await initPersistence();
 async function handleApi(req, res, url) {
   if (url.pathname.startsWith("/api/admin/")) {
     return handleAdminApi(req, res, url);
+  }
+
+  if (url.pathname.startsWith("/api/v1/")) {
+    return handleV1Api(req, res, url);
   }
 
   if (req.method === "POST" && url.pathname === "/api/register") {
@@ -198,6 +202,172 @@ async function handleApi(req, res, url) {
     await addFriend(userId, friendId);
     sendUser(friendId, { type: "friends", friends: getFriends(friendId) });
     return json(res, 200, { ok: true, friends: getFriends(userId) });
+  }
+
+  return json(res, 404, { ok: false, error: "Not found" });
+}
+
+async function handleV1Api(req, res, url) {
+  if (req.method === "POST" && url.pathname === "/api/v1/identity/create") {
+    const body = await readJson(req);
+    const publicKey = body.device_public_key || body.public_key;
+    if (!isBlindPublicKey(publicKey)) return json(res, 400, { ok: false, error: "Invalid device_public_key" });
+    const requestedId = sanitizeProtocolId(body.user_id || "");
+    const userId = requestedId || anonymousUserId();
+    store.users[userId] = {
+      publicKey,
+      fingerprint: blindFingerprint(publicKey),
+      updatedAt: Date.now(),
+      status: "ACTIVE",
+      protocol: "v1"
+    };
+    store.friends[userId] ||= [];
+    await saveStore();
+    recordFlow("v1.identity.created", { userId });
+    return json(res, 200, { user_id: userId, status: "CREATED", fingerprint: store.users[userId].fingerprint });
+  }
+
+  if (req.method === "GET" && url.pathname.startsWith("/api/v1/identity/")) {
+    const userId = sanitizeProtocolId(decodeURIComponent(url.pathname.split("/").pop() || ""));
+    const user = userId ? store.users[userId] : null;
+    if (!user) return json(res, 404, { ok: false, error: "Identity not found" });
+    return json(res, 200, {
+      user_id: userId,
+      public_key: user.publicKey,
+      verified: true,
+      fingerprint: user.fingerprint || blindFingerprint(user.publicKey),
+      status: user.status || "ACTIVE"
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/v1/device/register") {
+    const body = await readJson(req);
+    const userId = sanitizeProtocolId(body.user_id);
+    const deviceKey = body.device_key || body.device_public_key;
+    if (!userId || !store.users[userId] || !isBlindPublicKey(deviceKey)) {
+      return json(res, 400, { ok: false, error: "Invalid user_id or device_key" });
+    }
+    const deviceId = sanitizeProtocolId(body.device_id || "") || `DEV-${randomToken(10)}`;
+    store.devices[deviceId] = {
+      deviceId,
+      userId,
+      devicePublicKey: deviceKey,
+      deviceType: String(body.device_type || "UNKNOWN").slice(0, 32),
+      lastActive: Date.now(),
+      status: "ACTIVE"
+    };
+    await saveStore();
+    recordFlow("v1.device.registered", { userId, deviceId });
+    return json(res, 200, { device_id: deviceId, status: "REGISTERED" });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/v1/session/create") {
+    const body = await readJson(req);
+    const creatorId = sanitizeProtocolId(body.creator_id || body.sender_id || body.user_id);
+    const participantId = sanitizeProtocolId(body.receiver_id || body.participant_id);
+    const mode = String(body.mode || "EPHEMERAL_SESSION").toUpperCase();
+    const duration = clampNumber(Number(body.duration || 1800), 60, 7200);
+    if (!creatorId || !participantId || !store.users[creatorId] || !store.users[participantId] || creatorId === participantId) {
+      return json(res, 400, { ok: false, error: "Invalid creator_id or receiver_id" });
+    }
+    const sessionId = `SESSION-${randomToken(12)}`;
+    const now = Date.now();
+    store.sessions[sessionId] = {
+      sessionId,
+      creatorId,
+      participantId,
+      mode,
+      status: "CREATED",
+      createdAt: now,
+      expireTime: now + duration * 1000,
+      destroyStatus: "ACTIVE",
+      encryptedMetadata: body.encrypted_metadata || null
+    };
+    store.messages[sessionId] ||= [];
+    store.keyMetadata[sessionId] = { keyId: `KEY-${randomToken(10)}`, sessionId, status: "ACTIVE", updatedAt: now };
+    await saveStore();
+    recordFlow("v1.session.created", { sessionId, creatorId, participantId, mode, duration });
+    return json(res, 200, { session_id: sessionId, status: "WAITING", expire_time: store.sessions[sessionId].expireTime });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/v1/session/accept") {
+    const body = await readJson(req);
+    const sessionId = sanitizeProtocolId(body.session_id);
+    const session = store.sessions[sessionId];
+    if (!session || session.status === "DESTROYED") return json(res, 404, { ok: false, error: "Session not found" });
+    session.status = "ACTIVE";
+    session.acceptedAt = Date.now();
+    session.participantDeviceKey = body.device_key || null;
+    store.keyMetadata[sessionId] ||= { keyId: `KEY-${randomToken(10)}`, sessionId };
+    store.keyMetadata[sessionId].status = "ACTIVE";
+    store.keyMetadata[sessionId].updatedAt = Date.now();
+    await saveStore();
+    recordFlow("v1.session.accepted", { sessionId });
+    return json(res, 200, { status: "ACTIVE", session_token: `TOK-${randomToken(18)}` });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/v1/session/destroy") {
+    const body = await readJson(req);
+    const sessionId = sanitizeProtocolId(body.session_id);
+    const result = await destroyV1Session(sessionId, body.reason || "manual");
+    if (!result.ok) return json(res, 404, { ok: false, error: "Session not found" });
+    return json(res, 200, { status: "DESTROYED", session_id: sessionId });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/v1/message/send") {
+    const body = await readJson(req);
+    const sessionId = sanitizeProtocolId(body.session_id);
+    const session = store.sessions[sessionId];
+    if (!session || session.status === "DESTROYED" || Date.now() > Number(session.expireTime || 0)) {
+      if (session && session.status !== "DESTROYED") await destroyV1Session(sessionId, "timeout");
+      return json(res, 410, { ok: false, error: "Session expired or destroyed" });
+    }
+    if (!isCiphertext(body.ciphertext)) return json(res, 400, { ok: false, error: "Invalid ciphertext" });
+    const messageId = `MSG-${randomToken(12)}`;
+    const message = {
+      id: messageId,
+      sessionId,
+      senderId: sanitizeProtocolId(body.sender_id || ""),
+      recipientId: sanitizeProtocolId(body.recipient_id || ""),
+      ciphertext: String(body.ciphertext),
+      messageType: String(body.message_type || "TEXT").slice(0, 32),
+      padding: typeof body.padding === "string" ? body.padding.slice(0, 4096) : "",
+      createdTime: Date.now(),
+      destroyStatus: "ACTIVE",
+      delivered: false
+    };
+    store.messages[sessionId] ||= [];
+    store.messages[sessionId].push(message);
+    trimV1Messages(sessionId);
+    await saveStore();
+    recordFlow("v1.message.queued", { sessionId, messageId, messageType: message.messageType });
+    return json(res, 200, { message_id: messageId, status: "QUEUED" });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/v1/message/pull") {
+    const sessionId = sanitizeProtocolId(url.searchParams.get("session_id") || "");
+    const userId = sanitizeProtocolId(url.searchParams.get("user_id") || "");
+    const session = store.sessions[sessionId];
+    if (!session || session.status === "DESTROYED" || Date.now() > Number(session.expireTime || 0)) {
+      if (session && session.status !== "DESTROYED") await destroyV1Session(sessionId, "timeout");
+      return json(res, 200, { messages: [], session_status: "DESTROYED" });
+    }
+    const messages = (store.messages[sessionId] || [])
+      .filter((message) => !message.delivered && (!userId || message.senderId !== userId))
+      .map((message) => {
+        message.delivered = true;
+        return {
+          id: message.id,
+          session_id: message.sessionId,
+          ciphertext: message.ciphertext,
+          message_type: message.messageType,
+          created_time: message.createdTime
+        };
+      });
+    store.messages[sessionId] = (store.messages[sessionId] || []).filter((message) => !message.delivered);
+    await saveStore();
+    if (messages.length) recordFlow("v1.message.pulled", { sessionId, count: messages.length });
+    return json(res, 200, { messages, session_status: session.status, expire_time: session.expireTime });
   }
 
   return json(res, 404, { ok: false, error: "Not found" });
@@ -309,6 +479,43 @@ async function initPersistence() {
         friend_id TEXT NOT NULL,
         PRIMARY KEY (user_id, friend_id)
       );
+      CREATE TABLE IF NOT EXISTS devices (
+        device_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        device_public_key JSONB NOT NULL,
+        device_type TEXT,
+        last_active BIGINT NOT NULL,
+        status TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS sessions (
+        session_id TEXT PRIMARY KEY,
+        creator_id TEXT NOT NULL,
+        participant_id TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        expire_time BIGINT NOT NULL,
+        destroy_status TEXT NOT NULL,
+        encrypted_metadata JSONB
+      );
+      CREATE TABLE IF NOT EXISTS session_messages (
+        message_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        sender_id TEXT,
+        recipient_id TEXT,
+        ciphertext TEXT NOT NULL,
+        message_type TEXT NOT NULL,
+        padding TEXT,
+        created_time BIGINT NOT NULL,
+        destroy_status TEXT NOT NULL,
+        delivered BOOLEAN NOT NULL DEFAULT FALSE
+      );
+      CREATE TABLE IF NOT EXISTS key_metadata (
+        session_id TEXT PRIMARY KEY,
+        key_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at BIGINT NOT NULL
+      );
     `);
   }
   await loadStore();
@@ -318,7 +525,11 @@ async function loadStore() {
   if (usePostgres) {
     const users = await dbPool.query("SELECT user_id, public_key, fingerprint, updated_at FROM users");
     const friends = await dbPool.query("SELECT user_id, friend_id FROM friends");
-    store = { users: {}, friends: {} };
+    const devices = await dbPool.query("SELECT device_id, user_id, device_public_key, device_type, last_active, status FROM devices");
+    const sessions = await dbPool.query("SELECT session_id, creator_id, participant_id, mode, status, created_at, expire_time, destroy_status, encrypted_metadata FROM sessions");
+    const messages = await dbPool.query("SELECT message_id, session_id, sender_id, recipient_id, ciphertext, message_type, padding, created_time, destroy_status, delivered FROM session_messages");
+    const keys = await dbPool.query("SELECT session_id, key_id, status, updated_at FROM key_metadata");
+    store = { users: {}, friends: {}, devices: {}, sessions: {}, messages: {}, keyMetadata: {} };
     for (const row of users.rows) {
       store.users[row.user_id] = {
         publicKey: row.public_key,
@@ -332,25 +543,76 @@ async function loadStore() {
       store.friends[row.user_id].push(row.friend_id);
     }
     for (const friendList of Object.values(store.friends)) friendList.sort();
+    for (const row of devices.rows) {
+      store.devices[row.device_id] = {
+        deviceId: row.device_id,
+        userId: row.user_id,
+        devicePublicKey: row.device_public_key,
+        deviceType: row.device_type || "UNKNOWN",
+        lastActive: Number(row.last_active),
+        status: row.status
+      };
+    }
+    for (const row of sessions.rows) {
+      store.sessions[row.session_id] = {
+        sessionId: row.session_id,
+        creatorId: row.creator_id,
+        participantId: row.participant_id,
+        mode: row.mode,
+        status: row.status,
+        createdAt: Number(row.created_at),
+        expireTime: Number(row.expire_time),
+        destroyStatus: row.destroy_status,
+        encryptedMetadata: row.encrypted_metadata
+      };
+      store.messages[row.session_id] ||= [];
+    }
+    for (const row of messages.rows) {
+      store.messages[row.session_id] ||= [];
+      store.messages[row.session_id].push({
+        id: row.message_id,
+        sessionId: row.session_id,
+        senderId: row.sender_id || "",
+        recipientId: row.recipient_id || "",
+        ciphertext: row.ciphertext,
+        messageType: row.message_type,
+        padding: row.padding || "",
+        createdTime: Number(row.created_time),
+        destroyStatus: row.destroy_status,
+        delivered: Boolean(row.delivered)
+      });
+    }
+    for (const row of keys.rows) {
+      store.keyMetadata[row.session_id] = {
+        keyId: row.key_id,
+        sessionId: row.session_id,
+        status: row.status,
+        updatedAt: Number(row.updated_at)
+      };
+    }
     return;
   }
 
   try {
     store = JSON.parse(await readFile(DATA_FILE, "utf8"));
-    store.users ||= {};
-    store.friends ||= {};
+    ensureStoreShape();
   } catch {
-    store = { users: {}, friends: {} };
+    store = { users: {}, friends: {}, devices: {}, sessions: {}, messages: {}, keyMetadata: {} };
     await saveStore();
   }
 }
 
 async function saveStore() {
+  ensureStoreShape();
   if (usePostgres) {
     const client = await dbPool.connect();
     try {
       await client.query("BEGIN");
       await client.query("DELETE FROM friends");
+      await client.query("DELETE FROM key_metadata");
+      await client.query("DELETE FROM session_messages");
+      await client.query("DELETE FROM sessions");
+      await client.query("DELETE FROM devices");
       await client.query("DELETE FROM users");
       for (const [userId, user] of Object.entries(store.users)) {
         await client.query(
@@ -366,6 +628,32 @@ async function saveStore() {
           );
         }
       }
+      for (const [deviceId, device] of Object.entries(store.devices || {})) {
+        await client.query(
+          "INSERT INTO devices (device_id, user_id, device_public_key, device_type, last_active, status) VALUES ($1, $2, $3, $4, $5, $6)",
+          [deviceId, device.userId, device.devicePublicKey, device.deviceType || "UNKNOWN", device.lastActive || Date.now(), device.status || "ACTIVE"]
+        );
+      }
+      for (const [sessionId, session] of Object.entries(store.sessions || {})) {
+        await client.query(
+          "INSERT INTO sessions (session_id, creator_id, participant_id, mode, status, created_at, expire_time, destroy_status, encrypted_metadata) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+          [sessionId, session.creatorId, session.participantId, session.mode, session.status, session.createdAt, session.expireTime, session.destroyStatus || "ACTIVE", session.encryptedMetadata || null]
+        );
+      }
+      for (const messages of Object.values(store.messages || {})) {
+        for (const message of messages) {
+          await client.query(
+            "INSERT INTO session_messages (message_id, session_id, sender_id, recipient_id, ciphertext, message_type, padding, created_time, destroy_status, delivered) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            [message.id, message.sessionId, message.senderId || "", message.recipientId || "", message.ciphertext, message.messageType, message.padding || "", message.createdTime, message.destroyStatus || "ACTIVE", Boolean(message.delivered)]
+          );
+        }
+      }
+      for (const [sessionId, key] of Object.entries(store.keyMetadata || {})) {
+        await client.query(
+          "INSERT INTO key_metadata (session_id, key_id, status, updated_at) VALUES ($1, $2, $3, $4)",
+          [sessionId, key.keyId, key.status, key.updatedAt || Date.now()]
+        );
+      }
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
@@ -378,6 +666,42 @@ async function saveStore() {
 
   await mkdir(dirname(DATA_FILE), { recursive: true });
   await writeFile(DATA_FILE, JSON.stringify(store, null, 2));
+}
+
+function ensureStoreShape() {
+  store ||= {};
+  store.users ||= {};
+  store.friends ||= {};
+  store.devices ||= {};
+  store.sessions ||= {};
+  store.messages ||= {};
+  store.keyMetadata ||= {};
+}
+
+async function destroyV1Session(sessionId, reason = "manual") {
+  const session = store.sessions[sessionId];
+  if (!session) return { ok: false };
+  session.status = "DESTROYED";
+  session.destroyStatus = "DESTROYED";
+  session.destroyedAt = Date.now();
+  session.destroyReason = String(reason).slice(0, 64);
+  store.messages[sessionId] = [];
+  store.keyMetadata[sessionId] ||= { keyId: `KEY-${randomToken(10)}`, sessionId };
+  store.keyMetadata[sessionId].status = "DESTROYED";
+  store.keyMetadata[sessionId].updatedAt = Date.now();
+  await saveStore();
+  recordFlow("v1.session.destroyed", { sessionId, reason: session.destroyReason });
+  return { ok: true };
+}
+
+function trimV1Messages(sessionId) {
+  const queue = store.messages[sessionId] || [];
+  const expiresAt = Number(store.sessions[sessionId]?.expireTime || 0);
+  const active = queue
+    .filter((message) => message.destroyStatus !== "DESTROYED")
+    .filter(() => !expiresAt || Date.now() <= expiresAt)
+    .slice(-MAX_OFFLINE_QUEUE_PER_USER);
+  store.messages[sessionId] = active;
 }
 
 async function registerUser(userId, publicKey) {
@@ -699,7 +1023,11 @@ function sanitizedStore() {
       fingerprint: user.fingerprint,
       updatedAt: user.updatedAt
     }])),
-    friends: Object.fromEntries(Object.entries(store.friends).map(([userId, friends]) => [userId, [...friends].sort()]))
+    friends: Object.fromEntries(Object.entries(store.friends).map(([userId, friends]) => [userId, [...friends].sort()])),
+    devices: store.devices || {},
+    sessions: store.sessions || {},
+    messages: store.messages || {},
+    keyMetadata: store.keyMetadata || {}
   };
 }
 
@@ -718,7 +1046,14 @@ function isValidAdminStore(candidate) {
 }
 
 function normalizeAdminStore(candidate) {
-  const next = { users: {}, friends: {} };
+  const next = {
+    users: {},
+    friends: {},
+    devices: candidate.devices && typeof candidate.devices === "object" ? candidate.devices : {},
+    sessions: candidate.sessions && typeof candidate.sessions === "object" ? candidate.sessions : {},
+    messages: candidate.messages && typeof candidate.messages === "object" ? candidate.messages : {},
+    keyMetadata: candidate.keyMetadata && typeof candidate.keyMetadata === "object" ? candidate.keyMetadata : {}
+  };
   for (const [userId, user] of Object.entries(candidate.users)) {
     next.users[userId] = {
       publicKey: user.publicKey,
@@ -735,7 +1070,7 @@ function normalizeAdminStore(candidate) {
 
 function recordFlow(type, details = {}) {
   flowEvents.push({
-    id: crypto.randomUUID(),
+    id: randomUUID(),
     at: Date.now(),
     type,
     details
@@ -829,6 +1164,39 @@ function sanitizeId(value) {
   if (typeof value !== "string") return "";
   const clean = value.trim();
   return /^[a-zA-Z0-9_-]{3,32}$/.test(clean) ? clean : "";
+}
+
+function sanitizeProtocolId(value) {
+  if (typeof value !== "string") return "";
+  const clean = value.trim();
+  return /^[a-zA-Z0-9_-]{3,72}$/.test(clean) ? clean : "";
+}
+
+function anonymousUserId() {
+  return `A-${randomToken(4)}-${randomToken(4)}`;
+}
+
+function randomToken(bytes = 8) {
+  return randomBytes(bytes).toString("hex").toUpperCase();
+}
+
+function clampNumber(value, min, max) {
+  if (!Number.isFinite(value)) return min;
+  return Math.max(min, Math.min(max, Math.trunc(value)));
+}
+
+function isBlindPublicKey(value) {
+  if (typeof value === "string") return /^[A-Za-z0-9+/=_:-]{16,4096}$/.test(value);
+  if (!value || typeof value !== "object") return false;
+  return JSON.stringify(value).length <= 8192;
+}
+
+function isCiphertext(value) {
+  return typeof value === "string" && value.length >= 16 && value.length <= 65536;
+}
+
+function blindFingerprint(value) {
+  return createHash("sha256").update(typeof value === "string" ? value : canonicalJson(value)).digest("hex").match(/.{1,4}/g).slice(0, 8).join(" ");
 }
 
 function isPublicKey(value) {

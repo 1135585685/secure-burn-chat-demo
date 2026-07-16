@@ -1,4 +1,69 @@
-# Secure Burn Chat Demo
+# High Security Anonymous E2EE Messaging Platform
+
+This repository is being migrated from the original Secure Burn Chat demo into the v3.0 architecture described in the product design documents:
+
+- anonymous identity
+- device registration
+- server-blind encrypted message relay
+- ephemeral secure sessions
+- session-based destruction
+- Flutter client architecture
+- Rust crypto core skeleton
+
+The legacy web demo remains available for compatibility, but the new app direction is `mobile/flutter_secure_app`.
+
+## v3 API
+
+The Node/Render backend now exposes v1 product APIs:
+
+```text
+POST /api/v1/identity/create
+GET  /api/v1/identity/:id
+POST /api/v1/device/register
+POST /api/v1/session/create
+POST /api/v1/session/accept
+POST /api/v1/session/destroy
+POST /api/v1/message/send
+GET  /api/v1/message/pull
+```
+
+Server-blind principle:
+
+- the server accepts public keys, device metadata, session state, and ciphertext
+- the server does not need plaintext
+- session destruction deletes queued ciphertext and marks key metadata destroyed
+
+## Replacement App
+
+```text
+mobile/flutter_secure_app/
+```
+
+Implemented in the new app source:
+
+- Flutter bottom navigation: 会话 / 身份 / 通信 / 安全 / 设置
+- Riverpod providers
+- repository layer for `/api/v1`
+- anonymous identity creation
+- device registration
+- ephemeral secure session creation and acceptance
+- blind ciphertext send and pull
+- session destroy workflow
+- Rust crypto core skeleton under `rust/crypto_core`
+
+Build once Flutter SDK is installed:
+
+```bash
+cd mobile/flutter_secure_app
+flutter pub get
+flutter build apk --debug
+```
+
+On this machine, Homebrew failed to download Flutter and Rust due upstream download/index errors, so the source is prepared but not locally compiled in this pass.
+
+## Legacy Web Demo
+
+The original lightweight web communication demo is still served from `/`:
 
 一个轻量网页通信 Demo，重点演示：
 
@@ -17,7 +82,7 @@
 - 后台可管理用户、公钥、好友关系、服务器存储 JSON，并查看不含消息内容的数据流事件图
 - 单轮次消息窗口：同一方连续消息会保留；对方发出下一条后，上一方消息消失；最后一条消息 15 分钟后消失
 - 通过好友 ID 或邀请代码添加好友
-- 双方互相添加且好友在线后，才允许发送消息
+- 双方互相添加后允许发送；好友离线时进入短期密文队列
 - 好友可以删除
 - 支持退出当前会话
 - 支持删除所有记录：清除本机身份密钥、好友缓存、当前消息，并请求服务端删除用户资料和好友关系
