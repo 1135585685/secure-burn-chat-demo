@@ -105,6 +105,7 @@ class MainActivity : ComponentActivity() {
         var currentMessage by remember { mutableStateOf<VisibleMessage?>(null) }
         var countdownNow by remember { mutableStateOf(System.currentTimeMillis()) }
         var wipeConfirm by remember { mutableStateOf(false) }
+        var selectedTab by remember { mutableStateOf(AppTab.CHATS) }
         val friends = remember { mutableStateListOf<Friend>() }
         val keyChangedFriends = remember { mutableStateListOf<String>() }
         val scope = rememberCoroutineScope()
@@ -262,152 +263,221 @@ class MainActivity : ComponentActivity() {
                     }
 
                     item {
-                        CommercialStatusCard(
-                            status = status,
-                            tone = statusTone,
-                            connected = connected,
-                            activeUserId = activeUserId,
-                            activeFriend = activeFriend,
-                            keyChanged = activeKeyChanged,
-                            currentMessage = currentMessage,
-                            countdownSeconds = currentMessage?.let { max(0, ((it.expiresAt - countdownNow) / 1000).toInt()) } ?: 0
-                        )
+                        AppTabs(selectedTab = selectedTab, onSelect = { selectedTab = it })
                     }
 
-                    item {
-                        FriendManagerCard(
-                            friendId = friendId,
-                            friendInvite = friendInvite,
-                            onFriendIdChange = { friendId = it },
-                            onFriendInviteChange = { friendInvite = it },
-                            onAddFriend = {
-                                if (activeUserId.isBlank()) {
-                                    status = "请先登入。"
-                                    statusTone = UiTone.WARNING
-                                    return@FriendManagerCard
+                    if (selectedTab == AppTab.CHATS) {
+                        item {
+                            ConversationListCard(
+                                friends = friends,
+                                activeFriendId = activeFriendId,
+                                keyChangedFriends = keyChangedFriends,
+                                onSelect = {
+                                    activeFriendId = it
+                                    currentMessage = null
                                 }
-                                scope.launch(Dispatchers.IO) {
-                                    try {
-                                        val friend = resolveFriend(friendId.trim(), friendInvite.trim())
-                                        if (friend.userId == activeUserId) error("不能添加自己")
-                                        val result = api.addFriend(activeUserId, friend.userId, friend.publicKey)
-                                        val incoming = parseFriends(result.optJSONArray("friends"))
-                                        runOnUiThread {
-                                            replaceFriends(friends, incoming, keyChangedFriends)
-                                            saveFriends(activeUserId, friends)
-                                            activeFriendId = friend.userId
-                                            friendId = ""
-                                            friendInvite = ""
-                                            status = "已添加好友 ${friend.userId}，等待双向确认后可通信。"
-                                            statusTone = UiTone.SUCCESS
+                            )
+                        }
+                        item {
+                            ChatCard(
+                                friend = activeFriend,
+                                canSend = canSend,
+                                message = message,
+                                onMessageChange = { message = it },
+                                currentMessage = currentMessage,
+                                countdownSeconds = currentMessage?.let { max(0, ((it.expiresAt - countdownNow) / 1000).toInt()) } ?: 0,
+                                keyChanged = activeKeyChanged,
+                                onVerifyKey = {
+                                    if (activeFriendId.isNotBlank()) {
+                                        keyChangedFriends.remove(activeFriendId)
+                                        status = "已在本机标记 ${activeFriendId} 的新指纹为已验证。"
+                                        statusTone = UiTone.SUCCESS
+                                    }
+                                },
+                                onSend = {
+                                    val text = message.trim()
+                                    val pair = keyPair
+                                    val friend = activeFriend
+                                    if (text.isBlank() || pair == null || friend == null) return@ChatCard
+                                    if (!canSend) {
+                                        status = when {
+                                            activeKeyChanged -> "好友身份密钥已变更，重新验证指纹前已暂停发送。"
+                                            !connected -> "连接未就绪，消息没有发送。"
+                                            friend.confirmed -> "好友离线，暂不可发送。"
+                                            else -> "需要双方互相添加好友后才可发送。"
                                         }
+                                        statusTone = UiTone.WARNING
+                                        return@ChatCard
+                                    }
+                                    try {
+                                        val payload = JSONObject()
+                                            .put("text", text)
+                                            .put("burnAfter", 900)
+                                            .put("sentAt", System.currentTimeMillis())
+                                        val encrypted = crypto.encrypt(pair, friend.publicKey, payload)
+                                        socket?.send(
+                                            JSONObject()
+                                                .put("type", "message")
+                                                .put("from", activeUserId)
+                                                .put("to", friend.userId)
+                                                .put("encrypted", encrypted)
+                                        )
+                                        currentMessage = VisibleMessage(
+                                            id = UUID.randomUUID().toString(),
+                                            senderKey = "me",
+                                            from = "我",
+                                            text = text,
+                                            mine = true,
+                                            status = "已加密发送",
+                                            expiresAt = System.currentTimeMillis() + 900_000L
+                                        )
+                                        message = ""
+                                        status = "消息已本地加密并提交发送，等待服务端回执。"
+                                        statusTone = UiTone.INFO
                                     } catch (error: Throwable) {
-                                        runOnUiThread {
-                                            status = "添加失败：请确认好友 ID 已进入过系统，或粘贴完整邀请代码。"
-                                            statusTone = UiTone.WARNING
+                                        status = "加密失败，消息没有发送。"
+                                        statusTone = UiTone.DANGER
+                                    }
+                                }
+                            )
+                        }
+                    }
+
+                    if (selectedTab == AppTab.CONTACTS) {
+                        item {
+                            FriendManagerCard(
+                                friendId = friendId,
+                                friendInvite = friendInvite,
+                                onFriendIdChange = { friendId = it },
+                                onFriendInviteChange = { friendInvite = it },
+                                onAddFriend = {
+                                    if (activeUserId.isBlank()) {
+                                        status = "请先登入。"
+                                        statusTone = UiTone.WARNING
+                                        return@FriendManagerCard
+                                    }
+                                    scope.launch(Dispatchers.IO) {
+                                        try {
+                                            val friend = resolveFriend(friendId.trim(), friendInvite.trim())
+                                            if (friend.userId == activeUserId) error("不能添加自己")
+                                            val result = api.addFriend(activeUserId, friend.userId, friend.publicKey)
+                                            val incoming = parseFriends(result.optJSONArray("friends"))
+                                            runOnUiThread {
+                                                replaceFriends(friends, incoming, keyChangedFriends)
+                                                saveFriends(activeUserId, friends)
+                                                activeFriendId = friend.userId
+                                                selectedTab = AppTab.CHATS
+                                                friendId = ""
+                                                friendInvite = ""
+                                                status = "已添加好友 ${friend.userId}，等待双向确认后可通信。"
+                                                statusTone = UiTone.SUCCESS
+                                            }
+                                        } catch (error: Throwable) {
+                                            runOnUiThread {
+                                                status = "添加失败：请确认好友 ID 已进入过系统，或粘贴完整邀请代码。"
+                                                statusTone = UiTone.WARNING
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        )
-                    }
-
-                    item {
-                        FriendsCard(
-                            friends = friends,
-                            activeFriendId = activeFriendId,
-                            onSelect = {
-                                activeFriendId = it
-                                currentMessage = null
-                            },
-                            onDelete = { id ->
-                                if (activeUserId.isBlank()) return@FriendsCard
-                                scope.launch(Dispatchers.IO) {
-                                    try {
-                                        val result = api.deleteFriend(activeUserId, id)
-                                        val incoming = parseFriends(result.optJSONArray("friends"))
-                                        runOnUiThread {
-                                            replaceFriends(friends, incoming, keyChangedFriends)
-                                            saveFriends(activeUserId, friends)
-                                            if (activeFriendId == id) activeFriendId = ""
-                                            keyChangedFriends.remove(id)
-                                            currentMessage = null
-                                            status = "已删除好友：$id"
-                                            statusTone = UiTone.SUCCESS
-                                        }
-                                    } catch (error: Throwable) {
-                                        runOnUiThread {
-                                            status = "删除好友失败：${error.message ?: "服务不可用"}"
-                                            statusTone = UiTone.DANGER
+                            )
+                        }
+                        item {
+                            FriendsCard(
+                                friends = friends,
+                                activeFriendId = activeFriendId,
+                                keyChangedFriends = keyChangedFriends,
+                                onSelect = {
+                                    activeFriendId = it
+                                    selectedTab = AppTab.CHATS
+                                    currentMessage = null
+                                },
+                                onDelete = { id ->
+                                    if (activeUserId.isBlank()) return@FriendsCard
+                                    scope.launch(Dispatchers.IO) {
+                                        try {
+                                            val result = api.deleteFriend(activeUserId, id)
+                                            val incoming = parseFriends(result.optJSONArray("friends"))
+                                            runOnUiThread {
+                                                replaceFriends(friends, incoming, keyChangedFriends)
+                                                saveFriends(activeUserId, friends)
+                                                if (activeFriendId == id) activeFriendId = ""
+                                                keyChangedFriends.remove(id)
+                                                currentMessage = null
+                                                status = "已删除好友：$id"
+                                                statusTone = UiTone.SUCCESS
+                                            }
+                                        } catch (error: Throwable) {
+                                            runOnUiThread {
+                                                status = "删除好友失败：${error.message ?: "服务不可用"}"
+                                                statusTone = UiTone.DANGER
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        )
+                            )
+                        }
                     }
 
-                    item {
-                        ChatCard(
-                            friend = activeFriend,
-                            canSend = canSend,
-                            message = message,
-                            onMessageChange = { message = it },
-                            currentMessage = currentMessage,
-                            countdownSeconds = currentMessage?.let { max(0, ((it.expiresAt - countdownNow) / 1000).toInt()) } ?: 0,
-                            keyChanged = activeKeyChanged,
-                            onVerifyKey = {
-                                if (activeFriendId.isNotBlank()) {
-                                    keyChangedFriends.remove(activeFriendId)
-                                    status = "已在本机标记 ${activeFriendId} 的新指纹为已验证。"
+                    if (selectedTab == AppTab.SECURITY) {
+                        item {
+                            CommercialStatusCard(
+                                status = status,
+                                tone = statusTone,
+                                connected = connected,
+                                activeUserId = activeUserId,
+                                activeFriend = activeFriend,
+                                keyChanged = activeKeyChanged,
+                                currentMessage = currentMessage,
+                                countdownSeconds = currentMessage?.let { max(0, ((it.expiresAt - countdownNow) / 1000).toInt()) } ?: 0
+                            )
+                        }
+                        item {
+                            SecurityCenterCard(
+                                activeUserId = activeUserId,
+                                fingerprint = fingerprint,
+                                inviteCode = inviteCode,
+                                friends = friends,
+                                keyChangedFriends = keyChangedFriends,
+                                onCopyInvite = {
+                                    if (inviteCode.isNotBlank()) copyText("Secure Burn 邀请码", inviteCode)
+                                    status = "邀请代码已复制。"
                                     statusTone = UiTone.SUCCESS
-                                }
-                            },
-                            onSend = {
-                                val text = message.trim()
-                                val pair = keyPair
-                                val friend = activeFriend
-                                if (text.isBlank() || pair == null || friend == null) return@ChatCard
-                                if (!canSend) {
-                                    status = when {
-                                        activeKeyChanged -> "好友身份密钥已变更，重新验证指纹前已暂停发送。"
-                                        !connected -> "连接未就绪，消息没有发送。"
-                                        friend.confirmed -> "好友离线，暂不可发送。"
-                                        else -> "需要双方互相添加好友后才可发送。"
-                                    }
-                                    statusTone = UiTone.WARNING
-                                    return@ChatCard
-                                }
-                                try {
-                                    val payload = JSONObject()
-                                        .put("text", text)
-                                        .put("burnAfter", 900)
-                                        .put("sentAt", System.currentTimeMillis())
-                                    val encrypted = crypto.encrypt(pair, friend.publicKey, payload)
-                                    socket?.send(
-                                        JSONObject()
-                                            .put("type", "message")
-                                            .put("from", activeUserId)
-                                            .put("to", friend.userId)
-                                            .put("encrypted", encrypted)
-                                    )
-                                    currentMessage = VisibleMessage(
-                                        id = UUID.randomUUID().toString(),
-                                        senderKey = "me",
-                                        from = "我",
-                                        text = text,
-                                        mine = true,
-                                        status = "已加密发送",
-                                        expiresAt = System.currentTimeMillis() + 900_000L
-                                    )
-                                    message = ""
-                                    status = "消息已本地加密并提交发送，等待服务端回执。"
+                                },
+                                onVerifyFriend = { friendIdToVerify ->
+                                    keyChangedFriends.remove(friendIdToVerify)
+                                    status = "已在本机标记 $friendIdToVerify 的新指纹为已验证。"
+                                    statusTone = UiTone.SUCCESS
+                                },
+                                onWipe = { wipeConfirm = true }
+                            )
+                        }
+                    }
+
+                    if (selectedTab == AppTab.SETTINGS) {
+                        item {
+                            SettingsCard(
+                                activeUserId = activeUserId,
+                                connected = connected,
+                                status = status,
+                                onLogout = {
+                                    socket?.close()
+                                    socket = null
+                                    keyPair = null
+                                    publicKey = null
+                                    connected = false
+                                    activeUserId = ""
+                                    inviteCode = ""
+                                    fingerprint = "未生成"
+                                    activeFriendId = ""
+                                    currentMessage = null
+                                    friends.clear()
+                                    status = "已退出，本机当前会话已清空。"
                                     statusTone = UiTone.INFO
-                                } catch (error: Throwable) {
-                                    status = "加密失败，消息没有发送。"
-                                    statusTone = UiTone.DANGER
-                                }
-                            }
-                        )
+                                },
+                                onWipe = { wipeConfirm = true }
+                            )
+                        }
                     }
                 }
 
@@ -514,6 +584,81 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
+    private fun AppTabs(selectedTab: AppTab, onSelect: (AppTab) -> Unit) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AppTab.entries.forEach { tab ->
+                val selected = tab == selectedTab
+                if (selected) {
+                    Button(onClick = { onSelect(tab) }, modifier = Modifier.weight(1f)) {
+                        Text(tab.label)
+                    }
+                } else {
+                    OutlinedButton(onClick = { onSelect(tab) }, modifier = Modifier.weight(1f)) {
+                        Text(tab.label)
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun ConversationListCard(
+        friends: List<Friend>,
+        activeFriendId: String,
+        keyChangedFriends: List<String>,
+        onSelect: (String) -> Unit
+    ) {
+        SectionCard {
+            Text("聊天", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("会话列表不展示消息明文，只展示安全与交付状态。", color = Color(0xFF64748B), style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(10.dp))
+            if (friends.isEmpty()) {
+                Text("暂无会话。请到“联系人”添加好友。", color = Color(0xFF64748B))
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    friends.forEach { friend ->
+                        ConversationRow(
+                            friend = friend,
+                            selected = friend.userId == activeFriendId,
+                            keyChanged = friend.userId in keyChangedFriends,
+                            onSelect = { onSelect(friend.userId) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun ConversationRow(friend: Friend, selected: Boolean, keyChanged: Boolean, onSelect: () -> Unit) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, if (selected) Color(0xFF0F766E) else Color(0xFFE2E8F0), RoundedCornerShape(10.dp))
+                .background(if (selected) Color(0xFFE6FFFA) else Color.White, RoundedCornerShape(10.dp))
+                .clickable(onClick = onSelect)
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .background(if (keyChanged) Color(0xFFFEE2E2) else Color(0xFFE0F2FE), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(friend.userId.take(1).uppercase(), color = if (keyChanged) Color(0xFF991B1B) else Color(0xFF075985), fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(friend.userId, fontWeight = FontWeight.SemiBold)
+                Text(conversationStatus(friend, keyChanged), color = toneColors(contactTone(friend, keyChanged)).foreground, style = MaterialTheme.typography.bodySmall)
+                Text("最新消息状态：不显示明文预览", color = Color(0xFF94A3B8), style = MaterialTheme.typography.bodySmall)
+            }
+            StatusDot(contactTone(friend, keyChanged))
+        }
+    }
+
+    @Composable
     private fun FriendManagerCard(
         friendId: String,
         friendInvite: String,
@@ -548,6 +693,7 @@ class MainActivity : ComponentActivity() {
     private fun FriendsCard(
         friends: List<Friend>,
         activeFriendId: String,
+        keyChangedFriends: List<String>,
         onSelect: (String) -> Unit,
         onDelete: (String) -> Unit
     ) {
@@ -565,12 +711,113 @@ class MainActivity : ComponentActivity() {
                         FriendRow(
                             friend = friend,
                             selected = friend.userId == activeFriendId,
+                            keyChanged = friend.userId in keyChangedFriends,
                             onSelect = { onSelect(friend.userId) },
                             onDelete = { onDelete(friend.userId) }
                         )
                     }
                 }
             }
+        }
+    }
+
+    @Composable
+    private fun SecurityCenterCard(
+        activeUserId: String,
+        fingerprint: String,
+        inviteCode: String,
+        friends: List<Friend>,
+        keyChangedFriends: List<String>,
+        onCopyInvite: () -> Unit,
+        onVerifyFriend: (String) -> Unit,
+        onWipe: () -> Unit
+    ) {
+        SectionCard {
+            Text("安全中心", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(10.dp))
+            StatusRow("我的 ID", activeUserId.ifBlank { "未登入" }, if (activeUserId.isBlank()) UiTone.WARNING else UiTone.SUCCESS)
+            StatusRow("身份指纹", fingerprint, if (activeUserId.isBlank()) UiTone.WARNING else UiTone.SUCCESS)
+            StatusRow("公钥状态", if (activeUserId.isBlank()) "未注册" else "已注册到服务器，私钥保留在本机", if (activeUserId.isBlank()) UiTone.WARNING else UiTone.SUCCESS)
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(onClick = onCopyInvite, enabled = inviteCode.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
+                Text("复制我的邀请代码")
+            }
+            Spacer(Modifier.height(12.dp))
+            Text("好友指纹验证", fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
+            if (friends.isEmpty()) {
+                Text("暂无好友可验证。", color = Color(0xFF64748B))
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    friends.forEach { friend ->
+                        val changed = friend.userId in keyChangedFriends
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, toneColors(contactTone(friend, changed)).border, RoundedCornerShape(10.dp))
+                                .padding(10.dp)
+                        ) {
+                            Text(friend.userId, fontWeight = FontWeight.SemiBold)
+                            Text(contactState(friend, changed), color = toneColors(contactTone(friend, changed)).foreground)
+                            Text("指纹：${friend.fingerprint}", color = Color(0xFF64748B), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (changed) {
+                                Spacer(Modifier.height(6.dp))
+                                OutlinedButton(onClick = { onVerifyFriend(friend.userId) }, modifier = Modifier.fillMaxWidth()) {
+                                    Text("标记为已重新验证")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            NoticeBlock("删除所有记录会清除本机身份密钥、好友缓存、当前消息，并请求服务端删除账号资料。", UiTone.DANGER)
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(onClick = onWipe, colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB91C1C)), modifier = Modifier.fillMaxWidth()) {
+                Text("删除所有记录")
+            }
+        }
+    }
+
+    @Composable
+    private fun SettingsCard(
+        activeUserId: String,
+        connected: Boolean,
+        status: String,
+        onLogout: () -> Unit,
+        onWipe: () -> Unit
+    ) {
+        SectionCard {
+            Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(10.dp))
+            Text("账号", fontWeight = FontWeight.SemiBold)
+            StatusRow("当前账号", activeUserId.ifBlank { "未登入" }, if (activeUserId.isBlank()) UiTone.WARNING else UiTone.SUCCESS)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(onClick = onLogout, enabled = activeUserId.isNotBlank(), modifier = Modifier.weight(1f)) { Text("退出登录") }
+                OutlinedButton(onClick = onWipe, colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB91C1C)), modifier = Modifier.weight(1f)) { Text("删除账号") }
+            }
+            Spacer(Modifier.height(12.dp))
+            Text("隐私", fontWeight = FontWeight.SemiBold)
+            StatusRow("禁止截图", "已启用 FLAG_SECURE", UiTone.SUCCESS)
+            StatusRow("后台隐藏内容", "随系统安全窗口策略处理", UiTone.INFO)
+            StatusRow("剪贴板", "邀请代码复制后请通过系统剪贴板管理清除", UiTone.WARNING)
+            Spacer(Modifier.height(12.dp))
+            Text("通知", fontWeight = FontWeight.SemiBold)
+            StatusRow("通知内容", "默认不展示消息明文", UiTone.SUCCESS)
+            StatusRow("发送人显示", "后续接入系统通知权限时默认隐藏", UiTone.INFO)
+            Spacer(Modifier.height(12.dp))
+            Text("网络", fontWeight = FontWeight.SemiBold)
+            StatusRow("服务器", BuildConfig.SERVER_BASE_URL, UiTone.INFO)
+            StatusRow("连接状态", if (connected) "已连接" else "未连接或已断开", if (connected) UiTone.SUCCESS else UiTone.WARNING)
+            StatusRow("当前状态", status, if (connected) UiTone.SUCCESS else UiTone.INFO)
+            Spacer(Modifier.height(12.dp))
+            Text("开发者 / 测试", fontWeight = FontWeight.SemiBold)
+            StatusRow("明文捕获测试模式", "App 不主动提交；仅服务端测试开关控制", UiTone.SUCCESS)
+            StatusRow("调试日志", "未在 App 内展示消息明文日志", UiTone.SUCCESS)
+            Spacer(Modifier.height(12.dp))
+            Text("关于", fontWeight = FontWeight.SemiBold)
+            StatusRow("版本", "Android ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", UiTone.INFO)
+            StatusRow("协议", "demo-ecdh-v1，生产版仍需 libsignal", UiTone.WARNING)
         }
     }
 
@@ -627,11 +874,11 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun FriendRow(friend: Friend, selected: Boolean, onSelect: () -> Unit, onDelete: () -> Unit) {
+    private fun FriendRow(friend: Friend, selected: Boolean, keyChanged: Boolean, onSelect: () -> Unit, onDelete: () -> Unit) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .border(1.dp, if (selected) Color(0xFF0F766E) else Color(0xFFE2E8F0), RoundedCornerShape(10.dp))
+                .border(1.dp, if (keyChanged) Color(0xFFFCA5A5) else if (selected) Color(0xFF0F766E) else Color(0xFFE2E8F0), RoundedCornerShape(10.dp))
                 .background(if (selected) Color(0xFFE6FFFA) else Color.White, RoundedCornerShape(10.dp))
                 .clickable(onClick = onSelect)
                 .padding(10.dp),
@@ -640,12 +887,12 @@ class MainActivity : ComponentActivity() {
             Box(
                 modifier = Modifier
                     .size(10.dp)
-                    .background(if (friend.online) Color(0xFF16A34A) else if (friend.confirmed) Color(0xFF94A3B8) else Color(0xFFF59E0B), CircleShape)
+                    .background(if (keyChanged) Color(0xFFDC2626) else if (friend.online) Color(0xFF16A34A) else if (friend.confirmed) Color(0xFF94A3B8) else Color(0xFFF59E0B), CircleShape)
             )
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(friend.userId, fontWeight = FontWeight.SemiBold)
-                Text(friendState(friend), color = Color(0xFF64748B), style = MaterialTheme.typography.bodySmall)
+                Text(if (keyChanged) "身份密钥已变更，需重新验证" else friendState(friend), color = if (keyChanged) Color(0xFFB91C1C) else Color(0xFF64748B), style = MaterialTheme.typography.bodySmall)
                 Text(friend.fingerprint, maxLines = 1, overflow = TextOverflow.Ellipsis, color = Color(0xFF94A3B8), style = MaterialTheme.typography.bodySmall)
             }
             TextButton(onClick = onDelete) { Text("删除", color = Color(0xFFB91C1C)) }
@@ -883,6 +1130,22 @@ class MainActivity : ComponentActivity() {
         return if (friend.online) "在线，可发送" else "离线"
     }
 
+    private fun conversationStatus(friend: Friend, keyChanged: Boolean): String {
+        if (keyChanged) return "身份密钥已变更 · 需要重新验证"
+        if (!friend.confirmed) return "待对方确认 · 暂不可发送"
+        if (!friend.online) return "已双向确认 · 离线"
+        return "双向确认 · 在线"
+    }
+
+    @Composable
+    private fun StatusDot(tone: UiTone) {
+        Box(
+            modifier = Modifier
+                .size(10.dp)
+                .background(toneColors(tone).foreground, CircleShape)
+        )
+    }
+
     private fun chatSubtitle(friend: Friend?, keyChanged: Boolean = false): String {
         if (friend == null) return "双方互相添加且在线后才可发送。"
         if (keyChanged) return "身份密钥已变更，重新验证前已暂停发送。"
@@ -931,6 +1194,13 @@ class MainActivity : ComponentActivity() {
         INFO,
         WARNING,
         DANGER
+    }
+
+    private enum class AppTab(val label: String) {
+        CHATS("聊天"),
+        CONTACTS("联系人"),
+        SECURITY("安全"),
+        SETTINGS("设置")
     }
 
     private data class ToneColors(
